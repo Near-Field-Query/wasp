@@ -33,9 +33,9 @@ services:
       traefik:
         condition: service_started
     ports:
-      - "14265:14265/tcp" # API
-      - "8091:8091/tcp" # Faucet
-      - "9029:9029/tcp" # INX
+      - "0.0.0.0:14265:14265/tcp" # API
+      - "0.0.0.0:8091:8091/tcp" # Faucet
+      - "0.0.0.0:9029:9029/tcp" # INX
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.hornet.service=hornet"
@@ -91,10 +91,10 @@ services:
       hornet-nest:
         condition: service_started
     ports:
-      - "2112:2112/tcp" # Prometheus
-      - "4000:4000/tcp" # Peering
-      - "9090:9090/tcp" # WebAPI
-      - "6060:6060/tcp" # Profiling
+      - "0.0.0.0:2112:2112/tcp" # Prometheus
+      - "0.0.0.0:4000:4000/tcp" # Peering
+      - "0.0.0.0:9090:9090/tcp" # WebAPI
+      - "0.0.0.0:6060:6060/tcp" # Profiling
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.wasp-api.service=wasp-api"
@@ -153,8 +153,8 @@ services:
       - "traefik.http.routers.wasp-dashboard.middlewares=rewrite-wasp-dashboard"
       - "traefik.http.middlewares.rewrite-wasp-dashboard.stripprefix.prefixes=/wasp/dashboard"
     environment:
-      - WASP_API_URL=http://localhost/wasp/api
-      - L1_API_URL=http://localhost
+      - WASP_API_URL=http://wasp.nearfieldquery.io
+      - L1_API_URL=http://hornet.nearfieldquery.io
 
 volumes:
   wasp-db:

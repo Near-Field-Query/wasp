@@ -1,3 +1,25 @@
+HORNET:
+    ports:
+      - "192.168.1.117:14265:14265/tcp" # API
+      - "192.168.1.117:8091:8091/tcp" # Faucet
+      - "192.168.1.117:9029:9029/tcp" # INX
+
+
+WASP:
+    env:
+      - WASP_API_URL=http://wasp.nearfieldquery.io
+      - L1_API_URL=http://hornet.nearfieldquery.io
+    ports:
+      - "192.168.1.117:2112:2112/tcp" # Prometheus
+      - "192.168.1.117:4000:4000/tcp" # Peering
+      - "192.168.1.117:9090:9090/tcp" # WebAPI
+      - "192.168.1.117:6060:6060/tcp" # Profiling
+
+
+
+
+
+
 Address: tst1qp452409f9lmerlw6xmlyu5edkwv0q7vu9s6p7us2rvhu7yqy02gyex7rzd
 * committee size = 1
 * quorum = 1
