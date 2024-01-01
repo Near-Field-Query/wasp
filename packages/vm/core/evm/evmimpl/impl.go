@@ -4,9 +4,8 @@
 package evmimpl
 
 import (
-	"fmt"
+	"encoding/hex"
 
-	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -20,8 +19,10 @@ import (
 	"github.com/iotaledger/wasp/packages/kv"
 	"github.com/iotaledger/wasp/packages/kv/codec"
 	"github.com/iotaledger/wasp/packages/kv/dict"
+	"github.com/iotaledger/wasp/packages/parameters"
 	"github.com/iotaledger/wasp/packages/util"
 	"github.com/iotaledger/wasp/packages/util/panicutil"
+	"github.com/iotaledger/wasp/packages/vm"
 	"github.com/iotaledger/wasp/packages/vm/core/accounts"
 	"github.com/iotaledger/wasp/packages/vm/core/errors/coreerrors"
 	"github.com/iotaledger/wasp/packages/vm/core/evm"
@@ -39,6 +40,8 @@ var Processor = evm.Contract.Processor(nil,
 	evm.FuncRegisterERC20NativeTokenOnRemoteChain.WithHandler(restricted(registerERC20NativeTokenOnRemoteChain)),
 	evm.FuncRegisterERC20ExternalNativeToken.WithHandler(registerERC20ExternalNativeToken),
 	evm.FuncRegisterERC721NFTCollection.WithHandler(restricted(registerERC721NFTCollection)),
+
+	evm.FuncNewL1Deposit.WithHandler(newL1Deposit),
 
 	// views
 	evm.FuncGetERC20ExternalNativeTokenAddress.WithHandler(viewERC20ExternalNativeTokenAddress),
@@ -103,11 +106,11 @@ func applyTransaction(ctx isc.Sandbox) dict.Dict {
 	tx, err := evmtypes.DecodeTransaction(ctx.Params().Get(evm.FieldTransaction))
 	ctx.RequireNoError(err)
 
-	ctx.RequireCaller(isc.NewEthereumAddressAgentID(evmutil.MustGetSender(tx)))
+	ctx.RequireCaller(isc.NewEthereumAddressAgentID(ctx.ChainID(), evmutil.MustGetSender(tx)))
 
 	emu := createEmulator(ctx)
 
-	if tx.ChainId().Uint64() != uint64(emu.BlockchainDB().GetChainID()) {
+	if tx.Protected() && tx.ChainId().Uint64() != uint64(emu.BlockchainDB().GetChainID()) {
 		panic(errChainIDMismatch)
 	}
 
@@ -120,6 +123,9 @@ func applyTransaction(ctx isc.Sandbox) dict.Dict {
 	ctx.Privileged().GasBurnEnable(true)
 	burnGasErr := panicutil.CatchPanic(
 		func() {
+			if result == nil {
+				return
+			}
 			ctx.Gas().Burn(
 				gas.BurnCodeEVM1P,
 				gas.EVMGasToISC(result.UsedGas, &chainInfo.GasFeePolicy.EVMGasRatio),
@@ -134,7 +140,11 @@ func applyTransaction(ctx isc.Sandbox) dict.Dict {
 		func(err error) bool { return err != nil },
 	)
 	if revertErr != nil {
+		// mark receipt as failed
 		receipt.Status = types.ReceiptStatusFailed
+		// remove any events from the receipt
+		receipt.Logs = make([]*types.Log, 0)
+		receipt.Bloom = types.CreateBloom(types.Receipts{receipt})
 	}
 
 	// amend the gas usage (to include any ISC gas burned in sandbox calls)
@@ -148,7 +158,7 @@ func applyTransaction(ctx isc.Sandbox) dict.Dict {
 
 	// make sure we always store the EVM tx/receipt in the BlockchainDB, even
 	// if the ISC request is reverted
-	ctx.Privileged().OnWriteReceipt(func(evmPartition kv.KVStore) {
+	ctx.Privileged().OnWriteReceipt(func(evmPartition kv.KVStore, _ uint64) {
 		saveExecutedTx(evmPartition, chainInfo, tx, receipt)
 	})
 	// revert the changes in the state / txbuilder in case of error
@@ -383,16 +393,16 @@ func getChainID(ctx isc.SandboxView) dict.Dict {
 	return result(codec.EncodeUint16(chainID))
 }
 
+// include the revert reason in the error
 func tryGetRevertError(res *core.ExecutionResult) error {
-	// try to include the revert reason in the error
+	if res == nil {
+		return nil
+	}
 	if res.Err == nil {
 		return nil
 	}
 	if len(res.Revert()) > 0 {
-		reason, errUnpack := abi.UnpackRevert(res.Revert())
-		if errUnpack == nil {
-			return fmt.Errorf("%s: %v", res.Err.Error(), reason)
-		}
+		return vm.ErrEVMExecutionReverted.Create(hex.EncodeToString(res.Revert()))
 	}
 	return res.Err
 }
@@ -407,7 +417,7 @@ func callContract(ctx isc.Sandbox) dict.Dict {
 
 	callMsg, err := evmtypes.DecodeCallMsg(ctx.Params().Get(evm.FieldCallMsg))
 	ctx.RequireNoError(err)
-	ctx.RequireCaller(isc.NewEthereumAddressAgentID(callMsg.From))
+	ctx.RequireCaller(isc.NewEthereumAddressAgentID(ctx.ChainID(), callMsg.From))
 
 	emu := createEmulator(ctx)
 	res, err := emu.CallContract(callMsg, ctx.Gas().EstimateGasMode())
@@ -420,7 +430,9 @@ func callContract(ctx isc.Sandbox) dict.Dict {
 		ctx.Privileged().GasBurnEnable(true)
 		gasErr := panicutil.CatchPanic(
 			func() {
-				ctx.Gas().Burn(gas.BurnCodeEVM1P, gas.EVMGasToISC(res.UsedGas, &gasRatio))
+				if res != nil {
+					ctx.Gas().Burn(gas.BurnCodeEVM1P, gas.EVMGasToISC(res.UsedGas, &gasRatio))
+				}
 			},
 		)
 		ctx.Privileged().GasBurnEnable(false)
@@ -433,4 +445,44 @@ func callContract(ctx isc.Sandbox) dict.Dict {
 func getEVMGasRatio(ctx isc.SandboxBase) util.Ratio32 {
 	gasRatioViewRes := ctx.CallView(governance.Contract.Hname(), governance.ViewGetEVMGasRatio.Hname(), nil)
 	return codec.MustDecodeRatio32(gasRatioViewRes.Get(governance.ParamEVMGasRatio), gas.DefaultEVMGasRatio)
+}
+
+func newL1Deposit(ctx isc.Sandbox) dict.Dict {
+	// can only be called from the accounts contract
+	ctx.RequireCaller(isc.NewContractAgentID(ctx.ChainID(), accounts.Contract.Hname()))
+	params := ctx.Params()
+	agentIDBytes := params.MustGetBytes(evm.FieldAgentIDDepositOriginator)
+	addr := common.BytesToAddress(params.MustGetBytes(evm.FieldAddress))
+	assets, err := isc.AssetsFromBytes(params.MustGetBytes(evm.FieldAssets))
+	ctx.RequireNoError(err, "unable to parse assets from params")
+
+	// create a fake tx so that the deposit is visible by the EVM
+	// discard remainder in decimals conversion
+	wei, _ := util.BaseTokensDecimalsToEthereumDecimals(assets.BaseTokens, newEmulatorContext(ctx).BaseTokensDecimals())
+	nonce := uint64(0)
+	// encode the txdata as <AgentID sender>+<Assets>+[blockIndex + reqIndex] // the last part [ ] is needed so we don't produce txs with colliding hashes in the same or different blocks.
+	txData := []byte{}
+	txData = append(txData, agentIDBytes...)
+	txData = append(txData, assets.Bytes()...)
+	txData = append(txData, codec.Encode(ctx.StateAnchor().StateIndex+1)...)
+	txData = append(txData, codec.Encode(ctx.RequestIndex())...)
+	chainInfo := ctx.ChainInfo()
+	gasPrice := chainInfo.GasFeePolicy.GasPriceWei(parameters.L1().BaseToken.Decimals)
+	tx := types.NewTransaction(nonce, addr, wei, 0, gasPrice, txData)
+
+	// create a fake receipt
+	receipt := &types.Receipt{
+		Type:   types.LegacyTxType,
+		Logs:   make([]*types.Log, 0),
+		Status: types.ReceiptStatusSuccessful,
+	}
+	receipt.Bloom = types.CreateBloom(types.Receipts{receipt})
+
+	ctx.Privileged().OnWriteReceipt(func(evmPartition kv.KVStore, gasBurned uint64) {
+		receipt.GasUsed = gas.ISCGasBurnedToEVM(gasBurned, &chainInfo.GasFeePolicy.EVMGasRatio)
+		receipt.CumulativeGasUsed = createBlockchainDB(evmPartition, chainInfo).GetPendingCumulativeGasUsed() + receipt.GasUsed
+		createBlockchainDB(evmPartition, ctx.ChainInfo()).AddTransaction(tx, receipt)
+	})
+
+	return nil
 }

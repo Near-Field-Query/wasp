@@ -32,6 +32,7 @@ import (
 	"github.com/iotaledger/wasp/components/app"
 	"github.com/iotaledger/wasp/packages/apilib"
 	"github.com/iotaledger/wasp/packages/cryptolib"
+	"github.com/iotaledger/wasp/packages/evm/evmlogger"
 	"github.com/iotaledger/wasp/packages/isc"
 	"github.com/iotaledger/wasp/packages/kv/codec"
 	"github.com/iotaledger/wasp/packages/kv/dict"
@@ -69,6 +70,7 @@ func New(name string, config *ClusterConfig, dataPath string, t *testing.T, log 
 		}
 		log = testlogger.NewLogger(t)
 	}
+	evmlogger.Init(log)
 
 	config.setValidatorAddressIfNotSet() // privtangle prefix
 
@@ -869,4 +871,40 @@ func (clu *Cluster) AssertAddressBalances(addr iotago.Address, expected *isc.Ass
 
 func (clu *Cluster) GetOutputs(addr iotago.Address) (map[iotago.OutputID]iotago.Output, error) {
 	return clu.l1.OutputMap(addr)
+}
+
+func (clu *Cluster) MintL1NFT(immutableMetadata []byte, target iotago.Address, issuerKeypair *cryptolib.KeyPair) (iotago.OutputID, *iotago.NFTOutput, error) {
+	outputsSet, err := clu.l1.OutputMap(issuerKeypair.Address())
+	if err != nil {
+		return iotago.OutputID{}, nil, err
+	}
+	tx, err := transaction.NewMintNFTsTransaction(transaction.MintNFTsTransactionParams{
+		IssuerKeyPair:      issuerKeypair,
+		CollectionOutputID: nil,
+		Target:             target,
+		ImmutableMetadata:  [][]byte{immutableMetadata},
+		UnspentOutputs:     outputsSet,
+		UnspentOutputIDs:   isc.OutputSetToOutputIDs(outputsSet),
+	})
+	if err != nil {
+		return iotago.OutputID{}, nil, err
+	}
+	_, err = clu.l1.PostTxAndWaitUntilConfirmation(tx)
+	if err != nil {
+		return iotago.OutputID{}, nil, err
+	}
+
+	// go through the tx and find the newly minted NFT
+	outputSet, err := tx.OutputsSet()
+	if err != nil {
+		return iotago.OutputID{}, nil, err
+	}
+
+	for oID, o := range outputSet {
+		if oNFT, ok := o.(*iotago.NFTOutput); ok && oNFT.NFTID.Empty() {
+			return oID, oNFT, nil
+		}
+	}
+
+	return iotago.OutputID{}, nil, fmt.Errorf("inconsistency: couldn't find newly minted NFT in tx")
 }

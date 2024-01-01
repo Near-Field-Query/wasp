@@ -3,6 +3,7 @@ package gas
 import (
 	"fmt"
 	"io"
+	"math/big"
 
 	"github.com/iotaledger/hive.go/serializer/v2"
 	"github.com/iotaledger/wasp/packages/util"
@@ -13,7 +14,7 @@ import (
 var DefaultGasPerToken = util.Ratio32{A: 100, B: 1}
 
 // GasPerToken + ValidatorFeeShare + EVMGasRatio
-const GasPolicyByteSize = util.RatioByteSize + serializer.OneByte + util.RatioByteSize
+const FeePolicyByteSize = util.RatioByteSize + serializer.OneByte + util.RatioByteSize
 
 type FeePolicy struct {
 	// EVMGasRatio expresses the ratio at which EVM gas is converted to ISC gas
@@ -36,7 +37,7 @@ func (p *FeePolicy) FeeFromGasBurned(gasUnits, availableTokens uint64) (sendToOw
 
 	// round up
 	fee = p.FeeFromGas(gasUnits)
-	fee = util.MinUint64(fee, availableTokens)
+	fee = min(fee, availableTokens)
 
 	validatorPercentage := p.ValidatorFeeShare
 	if validatorPercentage > 100 {
@@ -60,6 +61,9 @@ func (p *FeePolicy) FeeFromGas(gasUnits uint64) uint64 {
 }
 
 func (p *FeePolicy) MinFee() uint64 {
+	if p.GasPerToken.A == 0 {
+		return 0
+	}
 	return p.FeeFromGas(BurnCodeMinimumGasPerRequest1P.Cost())
 }
 
@@ -67,7 +71,14 @@ func (p *FeePolicy) IsEnoughForMinimumFee(availableTokens uint64) bool {
 	return availableTokens >= p.MinFee()
 }
 
-func (p *FeePolicy) GasBudgetFromTokens(availableTokens uint64) uint64 {
+// if GasPerToken is '0:0' then set the GasBudget to MaxGasPerRequest
+func (p *FeePolicy) GasBudgetFromTokens(availableTokens uint64, limits ...*Limits) uint64 {
+	if p.GasPerToken.IsZero() {
+		if len(limits) == 0 {
+			panic("GasBudgetFromTokens without giving limits when GasPerToken")
+		}
+		return limits[0].MaxGasPerRequest
+	}
 	return p.GasPerToken.XFloor64(availableTokens)
 }
 
@@ -121,4 +132,24 @@ func (p *FeePolicy) Write(w io.Writer) error {
 	ww.Write(&p.GasPerToken)
 	ww.WriteUint8(p.ValidatorFeeShare)
 	return ww.Err
+}
+
+// GasPriceWei returns the gas price converted to wei
+func (p *FeePolicy) GasPriceWei(l1BaseTokenDecimals uint32) *big.Int {
+	// special case '0:0' for free request
+	if p.GasPerToken.IsZero() {
+		return big.NewInt(0)
+	}
+
+	// convert to wei (18 decimals)
+	decimalsDifference := 18 - l1BaseTokenDecimals
+	price := big.NewInt(10)
+	price.Exp(price, new(big.Int).SetUint64(uint64(decimalsDifference)), nil)
+
+	price.Mul(price, new(big.Int).SetUint64(uint64(p.GasPerToken.B)))
+	price.Div(price, new(big.Int).SetUint64(uint64(p.GasPerToken.A)))
+	price.Mul(price, new(big.Int).SetUint64(uint64(p.EVMGasRatio.A)))
+	price.Div(price, new(big.Int).SetUint64(uint64(p.EVMGasRatio.B)))
+
+	return price
 }

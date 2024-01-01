@@ -60,8 +60,8 @@ import (
 	"go.dedis.ch/kyber/v3"
 	"go.dedis.ch/kyber/v3/suites"
 
-	"github.com/iotaledger/hive.go/crypto/identity"
 	"github.com/iotaledger/hive.go/logger"
+	"github.com/iotaledger/hive.go/serializer/v2"
 	iotago "github.com/iotaledger/iota.go/v3"
 	"github.com/iotaledger/wasp/packages/chain/cons/bp"
 	"github.com/iotaledger/wasp/packages/chain/dss"
@@ -349,8 +349,10 @@ func (c *consImpl) Message(msg gpa.Message) gpa.OutMessages {
 			return msgs.AddAll(c.subACS.ACSOutputReceived(sub.Output()))
 		case subsystemTypeDSS:
 			return msgs.AddAll(c.subDSS.DSSOutputReceived(sub.Output()))
+		default:
+			c.log.Warnf("unexpected subsystem after check: %+v", msg)
+			return nil
 		}
-		panic(fmt.Errorf("unexpected subsystem after check: %+v", msg))
 	}
 	panic(fmt.Errorf("unexpected message: %v", msg))
 }
@@ -559,7 +561,7 @@ func (c *consImpl) uponVMInputsReceived(aggregatedProposals *bp.AggregatedBatchP
 		Requests:             aggregatedProposals.OrderedRequests(requests, *randomness),
 		TimeAssumption:       aggregatedProposals.AggregatedTime(),
 		Entropy:              *randomness,
-		ValidatorFeeTarget:   aggregatedProposals.ValidatorFeeTarget(),
+		ValidatorFeeTarget:   aggregatedProposals.ValidatorFeeTarget(*randomness),
 		EstimateGasMode:      false,
 		EnableGasBurnLogging: false,
 		Log:                  c.log.Named("VM"),
@@ -584,8 +586,6 @@ func (c *consImpl) uponVMOutputReceived(vmResult *vm.VMTaskResult) gpa.OutMessag
 			vmResult.RotationAddress,
 			isc.NewAliasOutputWithID(vmResult.Task.AnchorOutput, vmResult.Task.AnchorOutputID),
 			vmResult.Task.TimeAssumption,
-			identity.ID{},
-			identity.ID{},
 		)
 		if err != nil {
 			c.log.Warnf("Cannot create rotation TX, failed to make TX essence: %w", err)
@@ -595,6 +595,16 @@ func (c *consImpl) uponVMOutputReceived(vmResult *vm.VMTaskResult) gpa.OutMessag
 		}
 		vmResult.TransactionEssence = essence
 		vmResult.StateDraft = nil
+	}
+
+	// Make sure all the fields in the TX are ordered properly.
+	essenceBin, err := vmResult.TransactionEssence.Serialize(serializer.DeSeriModePerformValidation|serializer.DeSeriModePerformLexicalOrdering, nil)
+	if err != nil {
+		panic(fmt.Errorf("uponVMOutputReceived: cannot serialize the essence for lex ordering: %w", err))
+	}
+	_, err = vmResult.TransactionEssence.Deserialize(essenceBin, serializer.DeSeriModePerformValidation, nil)
+	if err != nil {
+		panic(fmt.Errorf("uponVMOutputReceived: cannot deserialize the essence for lex ordering: %w", err))
 	}
 
 	signingMsg, err := vmResult.TransactionEssence.SigningMessage()

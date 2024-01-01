@@ -5,6 +5,7 @@ package evmimpl
 
 import (
 	"fmt"
+	"math/big"
 	"reflect"
 	"strings"
 
@@ -21,16 +22,18 @@ import (
 // For example, if ISC.getL2NFTs() is called from solidity, this will
 // correspond to a call to [GetL2NFTs].
 type magicContractHandler struct {
-	ctx    isc.Sandbox
-	caller vm.ContractRef
+	ctx       isc.Sandbox
+	caller    vm.ContractRef
+	callValue *big.Int
 }
 
 // callHandler finds the requested ISC magic method by reflection, and executes
 // it.
-func callHandler(ctx isc.Sandbox, caller vm.ContractRef, method *abi.Method, args []any) []byte {
+func callHandler(ctx isc.Sandbox, caller vm.ContractRef, callValue *big.Int, method *abi.Method, args []any) []byte {
 	return reflectCall(&magicContractHandler{
-		ctx:    ctx,
-		caller: caller,
+		ctx:       ctx,
+		caller:    caller,
+		callValue: callValue,
 	}, method, args)
 }
 
@@ -83,14 +86,14 @@ func reflectCall(handler any, method *abi.Method, args []any) []byte {
 
 func (h *magicContractHandler) call(target, ep isc.Hname, params dict.Dict, allowance *isc.Assets) dict.Dict {
 	return h.ctx.Privileged().CallOnBehalfOf(
-		isc.NewEthereumAddressAgentID(h.caller.Address()),
+		isc.NewEthereumAddressAgentID(h.ctx.ChainID(), h.caller.Address()),
 		target, ep, params, allowance,
 	)
 }
 
 func (h *magicContractHandler) callView(target, ep isc.Hname, params dict.Dict) dict.Dict {
 	return h.ctx.Privileged().CallOnBehalfOf(
-		isc.NewEthereumAddressAgentID(h.caller.Address()),
+		isc.NewEthereumAddressAgentID(h.ctx.ChainID(), h.caller.Address()),
 		target, ep, params, nil,
 	)
 }

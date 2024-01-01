@@ -60,7 +60,7 @@ func TestRegister(t *testing.T) {
 
 func createOnLedgerRequest() isc.OnLedgerRequest {
 	requestMetadata := &isc.RequestMetadata{
-		SenderContract: isc.Hn("sender_contract"),
+		SenderContract: isc.ContractIdentityFromHname(isc.Hn("sender_contract")),
 		TargetContract: isc.Hn("target_contract"),
 		EntryPoint:     isc.Hn("entrypoint"),
 		Allowance:      isc.NewAssetsBaseTokens(1),
@@ -108,9 +108,9 @@ func TestMessageMetrics(t *testing.T) {
 	checkMetricsValues(t, 3, outputID3, ncm.InStateOutput())
 
 	// IN Alias output
-	aliasOutput1 := &iotago.AliasOutput{StateIndex: 1}
-	aliasOutput2 := &iotago.AliasOutput{StateIndex: 2}
-	aliasOutput3 := &iotago.AliasOutput{StateIndex: 3}
+	aliasOutput1 := &iotago.AliasOutput{StateIndex: 1, StateMetadata: []byte{}}
+	aliasOutput2 := &iotago.AliasOutput{StateIndex: 2, StateMetadata: []byte{}}
+	aliasOutput3 := &iotago.AliasOutput{StateIndex: 3, StateMetadata: []byte{}}
 
 	ncm.InAliasOutput().IncMessages(aliasOutput1)
 	cncm1.InAliasOutput().IncMessages(aliasOutput2)

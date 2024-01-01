@@ -37,7 +37,7 @@ func initStoreBlobCmd() *cobra.Command {
 			chain = defaultChainFallback(chain)
 
 			chainID := config.GetChain(chain)
-			uploadBlob(cliclients.WaspClient(node), chainID, util.EncodeParams(args))
+			uploadBlob(cliclients.WaspClient(node), chainID, util.EncodeParams(args, chainID))
 		},
 	}
 	waspcmd.WithWaspNodeFlag(cmd, &node)
@@ -48,10 +48,10 @@ func initStoreBlobCmd() *cobra.Command {
 func uploadBlob(client *apiclient.APIClient, chainID isc.ChainID, fieldValues dict.Dict) (hash hashing.HashValue) {
 	chainClient := cliclients.ChainClient(client, chainID)
 
-	hash, _, _, err := chainClient.UploadBlob(context.Background(), fieldValues)
+	hash, _, receipt, err := chainClient.UploadBlob(context.Background(), fieldValues)
 	log.Check(err)
 	log.Printf("uploaded blob to chain -- hash: %s\n", hash)
-	// TODO print receipt?
+	util.LogReceipt(*receipt)
 	return hash
 }
 

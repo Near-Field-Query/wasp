@@ -10,12 +10,13 @@ import (
 
 	"github.com/iotaledger/wasp/packages/chain"
 	"github.com/iotaledger/wasp/packages/isc"
+	"github.com/iotaledger/wasp/packages/parameters"
 	"github.com/iotaledger/wasp/packages/vm"
 	"github.com/iotaledger/wasp/packages/vm/core/governance"
 	"github.com/iotaledger/wasp/packages/vm/gas"
 )
 
-var evmErrorsRegex = regexp.MustCompile("out of gas|intrinsic gas too low|(execution reverted$)")
+var evmErrOutOfGasRegex = regexp.MustCompile("out of gas|intrinsic gas too low")
 
 // EVMEstimateGas executes the given request and discards the resulting chain state. It is useful
 // for estimating gas.
@@ -27,41 +28,31 @@ func EVMEstimateGas(ch chain.ChainCore, aliasOutput *isc.AliasOutputWithID, call
 		gasCap uint64
 	)
 
-	maximumPossibleGas := getMaxCallGasLimit(ch)
+	info := getChainInfo(ch)
 
+	maximumPossibleGas := gas.EVMCallGasLimit(info.GasLimits, &info.GasFeePolicy.EVMGasRatio)
 	if call.Gas >= params.TxGas {
 		hi = call.Gas
 	} else {
 		hi = maximumPossibleGas
 	}
 
+	if call.GasPrice == nil {
+		call.GasPrice = info.GasFeePolicy.GasPriceWei(parameters.L1().BaseToken.Decimals)
+	}
+
 	gasCap = hi
 
 	// Create a helper to check if a gas allowance results in an executable transaction
 	blockTime := time.Now()
-	executable := func(gas uint64) (failed bool, used uint64, err error) {
+	executable := func(gas uint64) (failed bool, result *vm.RequestResult, err error) {
 		call.Gas = gas
 		iscReq := isc.NewEVMOffLedgerCallRequest(ch.ID(), call)
 		res, err := runISCRequest(ch, aliasOutput, blockTime, iscReq, true)
 		if err != nil {
-			return true, 0, err
+			return true, nil, err
 		}
-		if res.Receipt.Error != nil {
-			if res.Receipt.Error.ErrorCode == vm.ErrGasBudgetExceeded.Code() {
-				// out of gas when charging ISC gas
-				return true, 0, nil
-			}
-			vmerr, resolvingErr := ResolveError(ch, res.Receipt.Error)
-			if resolvingErr != nil {
-				panic(fmt.Errorf("error resolving vmerror %w", resolvingErr))
-			}
-			if evmErrorsRegex.Match([]byte(vmerr.Error())) {
-				// increase gas
-				return true, 0, nil
-			}
-			return true, 0, vmerr
-		}
-		return false, res.Receipt.GasBurned, nil
+		return res.Receipt.Error != nil, res, nil
 	}
 
 	// Execute the binary search and hone in on an executable gas limit
@@ -83,13 +74,15 @@ func EVMEstimateGas(ch chain.ChainCore, aliasOutput *isc.AliasOutputWithID, call
 
 		var failed bool
 		var err error
-		failed, lastUsed, err = executable(mid)
+		failed, res, err := executable(mid)
 		if err != nil {
 			return 0, err
 		}
 		if failed {
+			lastUsed = 0
 			lo = mid
 		} else {
+			lastUsed = res.Receipt.GasBurned
 			hi = mid
 			if lastUsed == mid {
 				// if used gas == gas limit, then use this as the estimation.
@@ -103,11 +96,20 @@ func EVMEstimateGas(ch chain.ChainCore, aliasOutput *isc.AliasOutputWithID, call
 
 	// Reject the transaction as invalid if it still fails at the highest allowance
 	if hi == gasCap {
-		failed, _, err := executable(hi)
+		failed, res, err := executable(hi)
 		if err != nil {
 			return 0, err
 		}
 		if failed {
+			if res.Receipt.Error != nil {
+				isOutOfGas, resolvedErr, err := resolveError(ch, res.Receipt.Error)
+				if err != nil {
+					return 0, err
+				}
+				if resolvedErr != nil && !isOutOfGas {
+					return 0, resolvedErr
+				}
+			}
 			if hi == maximumPossibleGas {
 				return 0, fmt.Errorf("request might require more gas than it is allowed by the VM (%d), or will never succeed", gasCap)
 			}
@@ -118,7 +120,22 @@ func EVMEstimateGas(ch chain.ChainCore, aliasOutput *isc.AliasOutputWithID, call
 	return hi, nil
 }
 
-func getMaxCallGasLimit(ch chain.ChainCore) uint64 {
-	info := governance.NewStateAccess(mustLatestState(ch)).ChainInfo(ch.ID())
-	return gas.EVMCallGasLimit(info.GasLimits, &info.GasFeePolicy.EVMGasRatio)
+func getChainInfo(ch chain.ChainCore) *isc.ChainInfo {
+	return governance.NewStateAccess(mustLatestState(ch)).ChainInfo(ch.ID())
+}
+
+func resolveError(ch chain.ChainCore, receiptError *isc.UnresolvedVMError) (isOutOfGas bool, resolved *isc.VMError, err error) {
+	if receiptError.ErrorCode == vm.ErrGasBudgetExceeded.Code() {
+		// out of gas when charging ISC gas
+		return true, nil, nil
+	}
+	vmerr, resolvingErr := ResolveError(ch, receiptError)
+	if resolvingErr != nil {
+		return true, nil, fmt.Errorf("error resolving vmerror: %w", resolvingErr)
+	}
+	if evmErrOutOfGasRegex.Match([]byte(vmerr.Error())) {
+		// increase gas
+		return true, vmerr, nil
+	}
+	return false, vmerr, nil
 }

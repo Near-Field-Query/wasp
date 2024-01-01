@@ -19,10 +19,10 @@ package chain
 import (
 	"context"
 	"fmt"
+	"io"
+	"slices"
 	"sync"
 	"time"
-
-	"golang.org/x/exp/slices"
 
 	"github.com/iotaledger/hive.go/ds/shrinkingmap"
 	"github.com/iotaledger/hive.go/logger"
@@ -56,12 +56,14 @@ import (
 )
 
 const (
-	redeliveryPeriod             = 2 * time.Second // TODO: Make it configurable?
-	printStatusPeriod            = 3 * time.Second // TODO: Make it configurable?
-	consensusInstsInAdvance  int = 3               // TODO: Make it configurable?
-	awaitReceiptCleanupEvery int = 100             // TODO: Make it configurable?
-
 	msgTypeChainMgr byte = iota
+)
+
+var (
+	RedeliveryPeriod         = 2 * time.Second
+	PrintStatusPeriod        = 3 * time.Second
+	ConsensusInstsInAdvance  = 3
+	AwaitReceiptCleanupEvery = 100
 )
 
 type ChainRequests interface {
@@ -83,6 +85,7 @@ type Chain interface {
 	GetChainMetrics() *metrics.ChainMetrics
 	GetConsensusPipeMetrics() ConsensusPipeMetrics // TODO: Review this.
 	GetConsensusWorkflowStatus() ConsensusWorkflowStatus
+	GetMempoolContents() io.Reader
 }
 
 type CommitteeInfo struct {
@@ -279,6 +282,8 @@ func New(
 	recoveryTimeout time.Duration,
 	validatorAgentID isc.AgentID,
 	smParameters sm_gpa.StateManagerParameters,
+	mempoolTTL time.Duration,
+	mempoolBroadcastInterval time.Duration,
 ) (Chain, error) {
 	log.Debugf("Starting the chain, chainID=%v", chainID)
 	if listener == nil {
@@ -426,8 +431,10 @@ func New(
 		chainMetrics.Mempool,
 		chainMetrics.Pipe,
 		cni.listener,
+		mempoolTTL,
+		mempoolBroadcastInterval,
 	)
-	cni.chainMgr = gpa.NewAckHandler(cni.me, chainMgr.AsGPA(), redeliveryPeriod)
+	cni.chainMgr = gpa.NewAckHandler(cni.me, chainMgr.AsGPA(), RedeliveryPeriod)
 	cni.stateMgr = stateMgr
 	cni.mempool = mempool
 	cni.stateTrackerAct = NewStateTracker(ctx, stateMgr, cni.handleStateTrackerActCB, chainMetrics.StateManager.SetChainActiveStateWant, chainMetrics.StateManager.SetChainActiveStateHave, cni.log.Named("ST.ACT"))
@@ -522,7 +529,7 @@ func (cni *chainNodeImpl) run(ctx context.Context, cleanupFunc context.CancelFun
 	consOutputPipeOutCh := cni.consOutputPipe.Out()
 	consRecoverPipeOutCh := cni.consRecoverPipe.Out()
 	serversUpdatedPipeOutCh := cni.serversUpdatedPipe.Out()
-	redeliveryPeriodTicker := time.NewTicker(redeliveryPeriod)
+	redeliveryPeriodTicker := time.NewTicker(RedeliveryPeriod)
 	consensusDelayTicker := time.NewTicker(cni.consensusDelay)
 	for {
 		if ctx.Err() != nil {
@@ -750,7 +757,6 @@ func (cni *chainNodeImpl) handleNetMessage(ctx context.Context, recv *peering.Pe
 func (cni *chainNodeImpl) handleChainMgrOutput(ctx context.Context, outputUntyped gpa.Output) {
 	cni.log.Debugf("handleChainMgrOutput: %v", outputUntyped)
 	if outputUntyped == nil { // TODO: Will never be nil, fix it.
-		// TODO: Cleanup consensus instances for all the committees after some time.
 		// Not sure, if it is OK to terminate them immediately at this point.
 		// This is for the case, if the current node is not in a committee of a chain anymore.
 		cni.cleanupPublishingTXes(nil)
@@ -866,7 +872,7 @@ func (cni *chainNodeImpl) ensureConsensusInst(ctx context.Context, needConsensus
 	})
 
 	addLogIndex := logIndex
-	for i := 0; i < consensusInstsInAdvance; i++ {
+	for i := 0; i < ConsensusInstsInAdvance; i++ {
 		if !consensusInstances.Has(addLogIndex) {
 			consGrCtx, consGrCancel := context.WithCancel(ctx)
 			logIndexCopy := addLogIndex
@@ -874,7 +880,7 @@ func (cni *chainNodeImpl) ensureConsensusInst(ctx context.Context, needConsensus
 				consGrCtx, cni.chainID, cni.chainStore, dkShare, &logIndexCopy, cni.nodeIdentity,
 				cni.procCache, cni.mempool, cni.stateMgr, cni.net,
 				cni.validatorAgentID,
-				cni.recoveryTimeout, redeliveryPeriod, printStatusPeriod,
+				cni.recoveryTimeout, RedeliveryPeriod, PrintStatusPeriod,
 				cni.chainMetrics.Consensus,
 				cni.chainMetrics.Pipe,
 				cni.log.Named(fmt.Sprintf("C-%v.LI-%v", committeeAddr.String()[:10], logIndexCopy)),
@@ -892,6 +898,20 @@ func (cni *chainNodeImpl) ensureConsensusInst(ctx context.Context, needConsensus
 	}
 
 	consensusInstance, _ := consensusInstances.Get(logIndex)
+
+	// collect all active consensusIDs
+	activeConsensusInstances := []consGR.ConsensusID{}
+	cni.consensusInsts.ForEach(func(cAddr iotago.Ed25519Address, consMap *shrinkingmap.ShrinkingMap[cmt_log.LogIndex, *consensusInst]) bool {
+		consMap.ForEach(func(li cmt_log.LogIndex, _ *consensusInst) bool {
+			activeConsensusInstances = append(activeConsensusInstances, consGR.NewConsensusID(&cAddr, &li))
+			return true
+		})
+		return true
+	})
+	// update the mempool with the list of active consensus instances
+	cni.mempool.ConsensusInstancesUpdated(activeConsensusInstances)
+	// ----
+
 	return consensusInstance
 }
 
@@ -1080,7 +1100,7 @@ func (cni *chainNodeImpl) LatestAliasOutput(freshness StateFreshness) (*isc.Alia
 		}
 		return nil, fmt.Errorf("have no active state")
 	default:
-		panic(fmt.Errorf("Unexpected StateFreshness: %v", freshness))
+		panic(fmt.Errorf("unexpected StateFreshness: %v", freshness))
 	}
 }
 
@@ -1119,7 +1139,7 @@ func (cni *chainNodeImpl) LatestState(freshness StateFreshness) (state.State, er
 		}
 		return nil, fmt.Errorf("chain %v has no active state", cni.chainID)
 	default:
-		panic(fmt.Errorf("Unexpected StateFreshness: %v", freshness))
+		panic(fmt.Errorf("unexpected StateFreshness: %v", freshness))
 	}
 }
 
@@ -1229,6 +1249,10 @@ func (cni *chainNodeImpl) GetConsensusPipeMetrics() ConsensusPipeMetrics {
 
 func (cni *chainNodeImpl) GetConsensusWorkflowStatus() ConsensusWorkflowStatus {
 	return &consensusWorkflowStatusImpl{}
+}
+
+func (cni *chainNodeImpl) GetMempoolContents() io.Reader {
+	return cni.mempool.GetContents()
 }
 
 func (cni *chainNodeImpl) recoverStoreFromWAL(chainStore indexedstore.IndexedStore, chainWAL sm_gpa_utils.BlockWAL) {

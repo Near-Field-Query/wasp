@@ -5,13 +5,15 @@ package mempool
 
 import (
 	"fmt"
+	"io"
+	"slices"
 	"time"
-
-	"golang.org/x/exp/slices"
 
 	"github.com/iotaledger/hive.go/ds/shrinkingmap"
 	"github.com/iotaledger/hive.go/logger"
+	consGR "github.com/iotaledger/wasp/packages/chain/cons/cons_gr"
 	"github.com/iotaledger/wasp/packages/isc"
+	"github.com/iotaledger/wasp/packages/kv/codec"
 )
 
 // keeps a map of requests ordered by nonce for each account
@@ -25,8 +27,6 @@ type TypedPoolByNonce[V isc.OffLedgerRequest] struct {
 	log                 *logger.Logger
 }
 
-var _ RequestPool[isc.OffLedgerRequest] = &TypedPoolByNonce[isc.OffLedgerRequest]{}
-
 func NewTypedPoolByNonce[V isc.OffLedgerRequest](waitReq WaitReq, sizeMetric func(int), timeMetric func(time.Duration), log *logger.Logger) *TypedPoolByNonce[V] {
 	return &TypedPoolByNonce[V]{
 		waitReq:             waitReq,
@@ -39,9 +39,10 @@ func NewTypedPoolByNonce[V isc.OffLedgerRequest](waitReq WaitReq, sizeMetric fun
 }
 
 type OrderedPoolEntry[V isc.OffLedgerRequest] struct {
-	req V
-	old bool
-	ts  time.Time
+	req         V
+	old         bool
+	ts          time.Time
+	proposedFor []consGR.ConsensusID
 }
 
 func (p *TypedPoolByNonce[V]) Has(reqRef *isc.RequestRef) bool {
@@ -67,7 +68,7 @@ func (p *TypedPoolByNonce[V]) Add(request V) {
 	}
 
 	defer func() {
-		p.log.Debugf("ADD %v as key=%v, senderAccount: ", request.ID(), ref, account)
+		p.log.Debugf("ADD %v as key=%v, senderAccount: %s", request.ID(), ref, account)
 		p.sizeMetric(p.refLUT.Size())
 		p.waitReq.MarkAvailable(request)
 	}()
@@ -166,4 +167,24 @@ func (p *TypedPoolByNonce[V]) Filter(predicate func(request V, ts time.Time) boo
 
 func (p *TypedPoolByNonce[V]) StatusString() string {
 	return fmt.Sprintf("{|req|=%d}", p.refLUT.Size())
+}
+
+func (p *TypedPoolByNonce[V]) WriteContent(w io.Writer) {
+	p.reqsByAcountOrdered.ForEach(func(_ string, list []*OrderedPoolEntry[V]) bool {
+		for _, entry := range list {
+			jsonData, err := isc.RequestToJSON(entry.req)
+			if err != nil {
+				return false // stop iteration
+			}
+			_, err = w.Write(codec.EncodeUint32(uint32(len(jsonData))))
+			if err != nil {
+				return false // stop iteration
+			}
+			_, err = w.Write(jsonData)
+			if err != nil {
+				return false // stop iteration
+			}
+		}
+		return true
+	})
 }

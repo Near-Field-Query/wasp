@@ -5,6 +5,7 @@ package jsonrpc
 
 import (
 	"crypto/ecdsa"
+	"slices"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -12,6 +13,7 @@ import (
 
 type AccountManager struct {
 	accounts map[common.Address]*ecdsa.PrivateKey
+	addrs    []common.Address
 }
 
 func NewAccountManager(accounts []*ecdsa.PrivateKey) *AccountManager {
@@ -30,6 +32,7 @@ func (a *AccountManager) Add(keyPair *ecdsa.PrivateKey) {
 		return
 	}
 	a.accounts[addr] = keyPair
+	a.addrs = append(a.addrs, addr)
 }
 
 func (a *AccountManager) Get(addr common.Address) *ecdsa.PrivateKey {
@@ -37,11 +40,5 @@ func (a *AccountManager) Get(addr common.Address) *ecdsa.PrivateKey {
 }
 
 func (a *AccountManager) Addresses() []common.Address {
-	ret := make([]common.Address, len(a.accounts))
-	i := 0
-	for addr := range a.accounts {
-		ret[i] = addr
-		i++
-	}
-	return ret
+	return slices.Clone(a.addrs)
 }

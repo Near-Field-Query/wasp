@@ -2,6 +2,7 @@ package accounts
 
 import (
 	"errors"
+	"fmt"
 
 	iotago "github.com/iotaledger/iota.go/v3"
 	"github.com/iotaledger/wasp/packages/isc"
@@ -42,6 +43,10 @@ const (
 	PrefixNFTs = "n"
 	// PrefixNFTsByCollection | <agentID> | <collectionID> stores a map of <nftID> => true
 	PrefixNFTsByCollection = "c"
+	// prefixNewlyMintedNFTs stores a map of <position in minted list> => <newly minted NFT> to be updated when the outputID is known
+	prefixNewlyMintedNFTs = "N"
+	// prefixMintIDMap stores a map of <internal NFTID> => <NFTID> it is updated when the NFTID of newly minted nfts is known
+	prefixMintIDMap = "M"
 	// PrefixFoundries + <agentID> stores a map of <foundrySN> (uint32) => true
 	PrefixFoundries = "f"
 
@@ -57,8 +62,8 @@ const (
 	keyFoundryOutputRecords = "FO"
 	// keyNFTOutputRecords stores a map of <NFTID> => NFTOutputRec
 	keyNFTOutputRecords = "NO"
-	// keyNFTData stores a map of <NFTID> => isc.NFT
-	keyNFTData = "ND"
+	// keyNFTOwner stores a map of <NFTID> => isc.AgentID
+	keyNFTOwner = "NW"
 
 	// keyNewNativeTokens stores an array of <nativeTokenID>, containing the newly created native tokens that need filling out the OutputID
 	keyNewNativeTokens = "TN"
@@ -68,7 +73,11 @@ const (
 	keyNewNFTs = "NN"
 )
 
-func accountKey(agentID isc.AgentID) kv.Key {
+func accountKey(agentID isc.AgentID, chainID isc.ChainID) kv.Key {
+	if agentID.BelongsToChain(chainID) {
+		// save bytes by skipping the chainID bytes on agentIDs for this chain
+		return kv.Key(agentID.BytesWithoutChainID())
+	}
 	return kv.Key(agentID.Bytes())
 }
 
@@ -80,8 +89,8 @@ func allAccountsMapR(state kv.KVStoreReader) *collections.ImmutableMap {
 	return collections.NewMapReadOnly(state, keyAllAccounts)
 }
 
-func accountExists(state kv.KVStoreReader, agentID isc.AgentID) bool {
-	return allAccountsMapR(state).HasAt(agentID.Bytes())
+func accountExists(state kv.KVStoreReader, agentID isc.AgentID, chainID isc.ChainID) bool {
+	return allAccountsMapR(state).HasAt([]byte(accountKey(agentID, chainID)))
 }
 
 func allAccountsAsDict(state kv.KVStoreReader) dict.Dict {
@@ -94,16 +103,16 @@ func allAccountsAsDict(state kv.KVStoreReader) dict.Dict {
 }
 
 // touchAccount ensures the account is in the list of all accounts
-func touchAccount(state kv.KVStore, agentID isc.AgentID) {
-	allAccountsMap(state).SetAt([]byte(accountKey(agentID)), codec.EncodeBool(true))
+func touchAccount(state kv.KVStore, agentID isc.AgentID, chainID isc.ChainID) {
+	allAccountsMap(state).SetAt([]byte(accountKey(agentID, chainID)), codec.EncodeBool(true))
 }
 
 // HasEnoughForAllowance checks whether an account has enough balance to cover for the allowance
-func HasEnoughForAllowance(state kv.KVStoreReader, agentID isc.AgentID, allowance *isc.Assets) bool {
+func HasEnoughForAllowance(state kv.KVStoreReader, agentID isc.AgentID, allowance *isc.Assets, chainID isc.ChainID) bool {
 	if allowance == nil || allowance.IsEmpty() {
 		return true
 	}
-	accountKey := accountKey(agentID)
+	accountKey := accountKey(agentID, chainID)
 	if allowance != nil {
 		if getBaseTokens(state, accountKey) < allowance.BaseTokens {
 			return false
@@ -123,35 +132,35 @@ func HasEnoughForAllowance(state kv.KVStoreReader, agentID isc.AgentID, allowanc
 }
 
 // MoveBetweenAccounts moves assets between on-chain accounts
-func MoveBetweenAccounts(state kv.KVStore, fromAgentID, toAgentID isc.AgentID, assets *isc.Assets) error {
+func MoveBetweenAccounts(state kv.KVStore, fromAgentID, toAgentID isc.AgentID, assets *isc.Assets, chainID isc.ChainID) error {
 	if fromAgentID.Equals(toAgentID) {
 		// no need to move
 		return nil
 	}
 
-	if !debitFromAccount(state, accountKey(fromAgentID), assets) {
+	if !debitFromAccount(state, accountKey(fromAgentID, chainID), assets) {
 		return errors.New("MoveBetweenAccounts: not enough funds")
 	}
-	creditToAccount(state, accountKey(toAgentID), assets)
+	creditToAccount(state, accountKey(toAgentID, chainID), assets)
 
 	for _, nftID := range assets.NFTs {
-		nft, err := getNFTData(state, nftID)
-		if err != nil {
-			return err
+		nft := GetNFTData(state, nftID)
+		if nft == nil {
+			return fmt.Errorf("MoveBetweenAccounts: unknown NFT %s", nftID)
 		}
 		if !debitNFTFromAccount(state, fromAgentID, nft) {
 			return errors.New("MoveBetweenAccounts: NFT not found in origin account")
 		}
-		creditNFTToAccount(state, toAgentID, nft)
+		creditNFTToAccount(state, toAgentID, nft.ID, nft.Issuer)
 	}
 
-	touchAccount(state, fromAgentID)
-	touchAccount(state, toAgentID)
+	touchAccount(state, fromAgentID, chainID)
+	touchAccount(state, toAgentID, chainID)
 	return nil
 }
 
-func MustMoveBetweenAccounts(state kv.KVStore, fromAgentID, toAgentID isc.AgentID, assets *isc.Assets) {
-	err := MoveBetweenAccounts(state, fromAgentID, toAgentID, assets)
+func MustMoveBetweenAccounts(state kv.KVStore, fromAgentID, toAgentID isc.AgentID, assets *isc.Assets, chainID isc.ChainID) {
+	err := MoveBetweenAccounts(state, fromAgentID, toAgentID, assets, chainID)
 	if err != nil {
 		panic(err)
 	}
@@ -159,17 +168,18 @@ func MustMoveBetweenAccounts(state kv.KVStore, fromAgentID, toAgentID isc.AgentI
 
 // debitBaseTokensFromAllowance is used for adjustment of L2 when part of base tokens are taken for storage deposit
 // It takes base tokens from allowance to the common account and then removes them from the L2 ledger
-func debitBaseTokensFromAllowance(ctx isc.Sandbox, amount uint64) {
+func debitBaseTokensFromAllowance(ctx isc.Sandbox, amount uint64, chainID isc.ChainID) {
 	if amount == 0 {
 		return
 	}
 	storageDepositAssets := isc.NewAssetsBaseTokens(amount)
 	ctx.TransferAllowedFunds(CommonAccount(), storageDepositAssets)
-	DebitFromAccount(ctx.State(), CommonAccount(), storageDepositAssets)
+	DebitFromAccount(ctx.State(), CommonAccount(), storageDepositAssets, chainID)
 }
 
-func UpdateLatestOutputID(state kv.KVStore, anchorTxID iotago.TransactionID) {
+func UpdateLatestOutputID(state kv.KVStore, anchorTxID iotago.TransactionID, blockIndex uint32) {
 	updateNativeTokenOutputIDs(state, anchorTxID)
 	updateFoundryOutputIDs(state, anchorTxID)
 	updateNFTOutputIDs(state, anchorTxID)
+	updateNewlyMintedNFTOutputIDs(state, anchorTxID, blockIndex)
 }

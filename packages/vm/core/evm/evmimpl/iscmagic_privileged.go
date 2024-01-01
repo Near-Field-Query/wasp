@@ -19,8 +19,8 @@ func (h *magicContractHandler) MoveBetweenAccounts(
 	allowance iscmagic.ISCAssets,
 ) {
 	h.ctx.Privileged().MustMoveBetweenAccounts(
-		isc.NewEthereumAddressAgentID(sender),
-		isc.NewEthereumAddressAgentID(receiver),
+		isc.NewEthereumAddressAgentID(h.ctx.ChainID(), sender),
+		isc.NewEthereumAddressAgentID(h.ctx.ChainID(), receiver),
 		allowance.Unwrap(),
 	)
 }
@@ -62,10 +62,11 @@ func (h *magicContractHandler) MoveAllowedFunds(
 	to common.Address,
 	allowance iscmagic.ISCAssets,
 ) {
-	taken := subtractFromAllowance(h.ctx, from, to, allowance.Unwrap())
+	assets := allowance.Unwrap()
+	subtractFromAllowance(h.ctx, from, to, assets)
 	h.ctx.Privileged().MustMoveBetweenAccounts(
-		isc.NewEthereumAddressAgentID(from),
-		isc.NewEthereumAddressAgentID(to),
-		taken,
+		isc.NewEthereumAddressAgentID(h.ctx.ChainID(), from),
+		isc.NewEthereumAddressAgentID(h.ctx.ChainID(), to),
+		assets,
 	)
 }

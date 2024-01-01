@@ -91,11 +91,21 @@ func newEmulatorContext(sandbox isc.Sandbox) *emulatorContext {
 }
 
 func (ctx *emulatorContext) BlockKeepAmount() int32 {
-	return ctx.sandbox.ChainInfo().BlockKeepAmount
+	ret := int32(0)
+	// do not charge gas for this, internal checks of the emulator require this function to run before executing the request
+	ctx.WithoutGasBurn(func() {
+		ret = ctx.sandbox.ChainInfo().BlockKeepAmount
+	})
+	return ret
 }
 
 func (ctx *emulatorContext) GasLimits() emulator.GasLimits {
-	return gasLimits(ctx.sandbox.ChainInfo())
+	var ret emulator.GasLimits
+	// do not charge gas for this, internal checks of the emulator require this function to run before executing the request
+	ctx.WithoutGasBurn(func() {
+		ret = gasLimits(ctx.sandbox.ChainInfo())
+	})
+	return ret
 }
 
 func (ctx *emulatorContext) MagicContracts() map[common.Address]vm.ISCMagicContract {
@@ -115,20 +125,31 @@ func (*emulatorContext) BaseTokensDecimals() uint32 {
 }
 
 func (ctx *emulatorContext) GetBaseTokensBalance(addr common.Address) uint64 {
-	res := ctx.sandbox.CallView(
-		accounts.Contract.Hname(),
-		accounts.ViewBalanceBaseToken.Hname(),
-		dict.Dict{accounts.ParamAgentID: isc.NewEthereumAddressAgentID(addr).Bytes()},
-	)
-	return codec.MustDecodeUint64(res.Get(accounts.ParamBalance), 0)
+	ret := uint64(0)
+	// do not charge gas for this, internal checks of the emulator require this function to run before executing the request
+	ctx.WithoutGasBurn(func() {
+		res := ctx.sandbox.CallView(
+			accounts.Contract.Hname(),
+			accounts.ViewBalanceBaseToken.Hname(),
+			dict.Dict{accounts.ParamAgentID: isc.NewEthereumAddressAgentID(ctx.sandbox.ChainID(), addr).Bytes()},
+		)
+		ret = codec.MustDecodeUint64(res.Get(accounts.ParamBalance), 0)
+	})
+	return ret
 }
 
 func (ctx *emulatorContext) AddBaseTokensBalance(addr common.Address, amount uint64) {
-	ctx.sandbox.Privileged().CreditToAccount(isc.NewEthereumAddressAgentID(addr), isc.NewAssetsBaseTokens(amount))
+	ctx.sandbox.Privileged().CreditToAccount(
+		isc.NewEthereumAddressAgentID(ctx.sandbox.ChainID(), addr),
+		isc.NewAssetsBaseTokens(amount),
+	)
 }
 
 func (ctx *emulatorContext) SubBaseTokensBalance(addr common.Address, amount uint64) {
-	ctx.sandbox.Privileged().DebitFromAccount(isc.NewEthereumAddressAgentID(addr), isc.NewAssetsBaseTokens(amount))
+	ctx.sandbox.Privileged().DebitFromAccount(
+		isc.NewEthereumAddressAgentID(ctx.sandbox.ChainID(), addr),
+		isc.NewAssetsBaseTokens(amount),
+	)
 }
 
 func (ctx *emulatorContext) TakeSnapshot() int {
@@ -137,4 +158,11 @@ func (ctx *emulatorContext) TakeSnapshot() int {
 
 func (ctx *emulatorContext) RevertToSnapshot(i int) {
 	ctx.sandbox.RevertToStateSnapshot(i)
+}
+
+func (ctx *emulatorContext) WithoutGasBurn(f func()) {
+	prev := ctx.sandbox.Privileged().GasBurnEnabled()
+	ctx.sandbox.Privileged().GasBurnEnable(false)
+	f()
+	ctx.sandbox.Privileged().GasBurnEnable(prev)
 }

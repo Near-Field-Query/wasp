@@ -4,12 +4,16 @@
 package evmimpl
 
 import (
+	"math/big"
+
 	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/iotaledger/wasp/packages/hashing"
 	"github.com/iotaledger/wasp/packages/isc"
 	"github.com/iotaledger/wasp/packages/kv/codec"
 	"github.com/iotaledger/wasp/packages/kv/dict"
+	"github.com/iotaledger/wasp/packages/parameters"
+	"github.com/iotaledger/wasp/packages/util"
 	"github.com/iotaledger/wasp/packages/vm/core/errors/coreerrors"
 	"github.com/iotaledger/wasp/packages/vm/core/evm"
 	"github.com/iotaledger/wasp/packages/vm/core/evm/iscmagic"
@@ -43,15 +47,32 @@ func (h *magicContractHandler) Allow(target common.Address, allowance iscmagic.I
 
 // handler for ISCSandbox::takeAllowedFunds
 func (h *magicContractHandler) TakeAllowedFunds(addr common.Address, allowance iscmagic.ISCAssets) {
-	taken := subtractFromAllowance(h.ctx, addr, h.caller.Address(), allowance.Unwrap())
+	assets := allowance.Unwrap()
+	subtractFromAllowance(h.ctx, addr, h.caller.Address(), assets)
 	h.ctx.Privileged().MustMoveBetweenAccounts(
-		isc.NewEthereumAddressAgentID(addr),
-		isc.NewEthereumAddressAgentID(h.caller.Address()),
-		taken,
+		isc.NewEthereumAddressAgentID(h.ctx.ChainID(), addr),
+		isc.NewEthereumAddressAgentID(h.ctx.ChainID(), h.caller.Address()),
+		assets,
 	)
 }
 
 var errInvalidAllowance = coreerrors.Register("allowance must not be greater than sent tokens").Create()
+
+func (h *magicContractHandler) handleCallValue(callValue *big.Int) uint64 {
+	adjustedTxValue, _ := util.EthereumDecimalsToBaseTokenDecimals(callValue, parameters.L1().BaseToken.Decimals)
+
+	evmAddr := isc.NewEthereumAddressAgentID(h.ctx.ChainID(), iscmagic.Address)
+	caller := isc.NewEthereumAddressAgentID(h.ctx.ChainID(), h.caller.Address())
+
+	// Move the already transferred base tokens from the 0x1074 address back to the callers account.
+	h.ctx.Privileged().MustMoveBetweenAccounts(
+		evmAddr,
+		caller,
+		isc.NewAssetsBaseTokens(adjustedTxValue),
+	)
+
+	return adjustedTxValue
+}
 
 // handler for ISCSandbox::send
 func (h *magicContractHandler) Send(
@@ -68,7 +89,12 @@ func (h *magicContractHandler) Send(
 		Metadata:                      metadata.Unwrap(),
 		Options:                       sendOptions.Unwrap(),
 	}
-	// 	id := nftID.Unwrap()
+
+	if h.callValue.BitLen() > 0 {
+		additionalCallValue := h.handleCallValue(h.callValue)
+		req.Assets.BaseTokens += additionalCallValue
+	}
+
 	h.adjustStorageDeposit(req)
 
 	// make sure that allowance <= sent tokens, so that the target contract does not
@@ -79,7 +105,10 @@ func (h *magicContractHandler) Send(
 
 	h.moveAssetsToCommonAccount(req.Assets)
 
-	h.ctx.Send(req)
+	h.ctx.Privileged().SendOnBehalfOf(
+		isc.ContractIdentityFromEVMAddress(h.caller.Address()),
+		req,
+	)
 }
 
 // handler for ISCSandbox::call
@@ -117,7 +146,7 @@ func (h *magicContractHandler) adjustStorageDeposit(req isc.RequestParameters) {
 // account before sending to L1
 func (h *magicContractHandler) moveAssetsToCommonAccount(assets *isc.Assets) {
 	h.ctx.Privileged().MustMoveBetweenAccounts(
-		isc.NewEthereumAddressAgentID(h.caller.Address()),
+		isc.NewEthereumAddressAgentID(h.ctx.ChainID(), h.caller.Address()),
 		h.ctx.AccountID(),
 		assets,
 	)
@@ -126,7 +155,7 @@ func (h *magicContractHandler) moveAssetsToCommonAccount(assets *isc.Assets) {
 // handler for ISCSandbox::registerERC20NativeToken
 func (h *magicContractHandler) RegisterERC20NativeToken(foundrySN uint32, name, symbol string, decimals uint8, allowance iscmagic.ISCAssets) {
 	h.ctx.Privileged().CallOnBehalfOf(
-		isc.NewEthereumAddressAgentID(h.caller.Address()),
+		isc.NewEthereumAddressAgentID(h.ctx.ChainID(), h.caller.Address()),
 		evm.Contract.Hname(),
 		evm.FuncRegisterERC20NativeToken.Hname(),
 		dict.Dict{

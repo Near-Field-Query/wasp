@@ -15,6 +15,7 @@ import (
 	"github.com/iotaledger/wasp/packages/parameters"
 	"github.com/iotaledger/wasp/packages/state"
 	"github.com/iotaledger/wasp/packages/trie"
+	"github.com/iotaledger/wasp/packages/vm/gas"
 )
 
 // ChainBackend provides access to the underlying ISC chain.
@@ -23,6 +24,7 @@ type ChainBackend interface {
 	EVMCall(aliasOutput *isc.AliasOutputWithID, callMsg ethereum.CallMsg) ([]byte, error)
 	EVMEstimateGas(aliasOutput *isc.AliasOutputWithID, callMsg ethereum.CallMsg) (uint64, error)
 	EVMTraceTransaction(aliasOutput *isc.AliasOutputWithID, blockTime time.Time, iscRequestsInBlock []isc.Request, txIndex uint64, tracer tracers.Tracer) error
+	FeePolicy(blockIndex uint32) (*gas.FeePolicy, error)
 	ISCChainID() *isc.ChainID
 	ISCCallView(chainState state.State, scName string, funName string, args dict.Dict) (dict.Dict, error)
 	ISCLatestAliasOutput() (*isc.AliasOutputWithID, error)
@@ -30,4 +32,6 @@ type ChainBackend interface {
 	ISCStateByBlockIndex(blockIndex uint32) (state.State, error)
 	ISCStateByTrieRoot(trieRoot trie.Hash) (state.State, error)
 	BaseToken() *parameters.BaseToken
+	TakeSnapshot() (int, error)
+	RevertToSnapshot(int) error
 }

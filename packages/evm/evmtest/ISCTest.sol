@@ -35,6 +35,13 @@ contract ISCTest {
         emit RequestIDEvent(reqID);
     }
 
+    event DummyEvent(string s);
+
+    function emitDummyEvent() public {
+        emit DummyEvent("foobar");
+    }
+ 
+
     event SenderAccountEvent(ISCAgentID sender);
 
     function emitSenderAccount() public {
@@ -43,7 +50,7 @@ contract ISCTest {
     }
 
     function sendBaseTokens(L1Address memory receiver, uint64 baseTokens)
-        public
+        public payable
     {
         ISCAssets memory allowance;
         if (baseTokens == 0) {
@@ -188,6 +195,19 @@ contract ISCTest {
                 return r.items[i].value;
             }
         }
+        revert();
+    }
+
+    error CustomError(uint8);
+
+    function revertWithCustomError() public pure {
+        revert CustomError(42);
+    }
+
+    event SomeEvent();
+
+    function emitEventAndRevert() public {
+        emit SomeEvent();
         revert();
     }
 }

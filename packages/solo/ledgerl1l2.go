@@ -27,7 +27,7 @@ func (ch *Chain) L2Accounts() []isc.AgentID {
 	keys := d.KeysSorted()
 	ret := make([]isc.AgentID, 0, len(keys)-1)
 	for _, key := range keys {
-		aid, err := codec.DecodeAgentID([]byte(key))
+		aid, err := accounts.AgentIDFromKey(key, ch.ChainID)
 		require.NoError(ch.Env.T, err)
 		ret = append(ret, aid)
 	}
@@ -70,8 +70,14 @@ func (ch *Chain) L2LedgerString() string {
 
 // L2Assets return all tokens contained in the on-chain account controlled by the 'agentID'
 func (ch *Chain) L2Assets(agentID isc.AgentID) *isc.Assets {
+	return ch.L2AssetsAtStateIndex(agentID, ch.LatestBlockIndex())
+}
+
+func (ch *Chain) L2AssetsAtStateIndex(agentID isc.AgentID, stateIndex uint32) *isc.Assets {
+	chainState, err := ch.store.StateByIndex(stateIndex)
+	require.NoError(ch.Env.T, err)
 	assets := ch.parseAccountBalance(
-		ch.CallView(accounts.Contract.Name, accounts.ViewBalance.Name, accounts.ParamAgentID, agentID),
+		ch.CallViewAtState(chainState, accounts.Contract.Name, accounts.ViewBalance.Name, accounts.ParamAgentID, agentID),
 	)
 	assets.NFTs = ch.L2NFTs(agentID)
 	return assets
@@ -79,6 +85,10 @@ func (ch *Chain) L2Assets(agentID isc.AgentID) *isc.Assets {
 
 func (ch *Chain) L2BaseTokens(agentID isc.AgentID) uint64 {
 	return ch.L2Assets(agentID).BaseTokens
+}
+
+func (ch *Chain) L2BaseTokensAtStateIndex(agentID isc.AgentID, stateIndex uint32) uint64 {
+	return ch.L2AssetsAtStateIndex(agentID, stateIndex).BaseTokens
 }
 
 func (ch *Chain) L2NFTs(agentID isc.AgentID) []iotago.NFTID {
@@ -358,13 +368,13 @@ func (ch *Chain) MustDepositNFT(nft *isc.NFT, to isc.AgentID, owner *cryptolib.K
 
 // Withdraw sends assets from the L2 account to L1
 func (ch *Chain) Withdraw(assets *isc.Assets, user *cryptolib.KeyPair) error {
-	_, err := ch.PostRequestSync(
-		NewCallParams(accounts.Contract.Name, accounts.FuncWithdraw.Name).
-			AddAllowance(assets).
-			AddAllowance(isc.NewAssetsBaseTokens(1*isc.Million)). // for storage deposit
-			WithGasBudget(math.MaxUint64),
-		user,
-	)
+	req := NewCallParams(accounts.Contract.Name, accounts.FuncWithdraw.Name).
+		AddAllowance(assets).
+		WithGasBudget(math.MaxUint64)
+	if assets.BaseTokens == 0 {
+		req.AddAllowance(isc.NewAssetsBaseTokens(1 * isc.Million)) // for storage deposit
+	}
+	_, err := ch.PostRequestOffLedger(req, user)
 	return err
 }
 

@@ -50,6 +50,11 @@ func (reqctx *requestContext) ModifyFoundrySupply(sn uint32, delta *big.Int) int
 	return reqctx.vm.txbuilder.ModifyNativeTokenSupply(nativeTokenID, delta)
 }
 
+func (reqctx *requestContext) MintNFT(addr iotago.Address, immutableMetadata []byte, issuer iotago.Address) (uint16, *iotago.NFTOutput) {
+	reqctx.mustBeCalledFromContract(accounts.Contract)
+	return reqctx.vm.txbuilder.MintNFT(addr, immutableMetadata, issuer)
+}
+
 func (reqctx *requestContext) RetryUnprocessable(req isc.Request, outputID iotago.OutputID) {
 	retryReq := isc.NewRetryOnLedgerRequest(req.(isc.OnLedgerRequest), outputID)
 	reqctx.unprocessableToRetry = append(reqctx.unprocessableToRetry, retryReq)
@@ -58,4 +63,8 @@ func (reqctx *requestContext) RetryUnprocessable(req isc.Request, outputID iotag
 func (reqctx *requestContext) CallOnBehalfOf(caller isc.AgentID, target, entryPoint isc.Hname, params dict.Dict, allowance *isc.Assets) dict.Dict {
 	reqctx.Debugf("CallOnBehalfOf: caller = %s, target = %s, entryPoint = %s, params = %s", caller.String(), target.String(), entryPoint.String(), params.String())
 	return reqctx.callProgram(target, entryPoint, params, allowance, caller)
+}
+
+func (reqctx *requestContext) SendOnBehalfOf(caller isc.ContractIdentity, metadata isc.RequestParameters) {
+	reqctx.doSend(caller, metadata)
 }

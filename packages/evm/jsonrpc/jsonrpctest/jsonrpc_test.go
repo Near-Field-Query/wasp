@@ -20,11 +20,13 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/iotaledger/hive.go/logger"
+	"github.com/iotaledger/wasp/packages/evm/evmerrors"
 	"github.com/iotaledger/wasp/packages/evm/evmtest"
 	"github.com/iotaledger/wasp/packages/evm/evmtypes"
 	"github.com/iotaledger/wasp/packages/evm/evmutil"
 	"github.com/iotaledger/wasp/packages/evm/jsonrpc"
 	"github.com/iotaledger/wasp/packages/isc"
+	"github.com/iotaledger/wasp/packages/parameters"
 	"github.com/iotaledger/wasp/packages/solo"
 	"github.com/iotaledger/wasp/packages/testutil/testlogger"
 	"github.com/iotaledger/wasp/packages/vm/core/evm"
@@ -37,8 +39,6 @@ type soloTestEnv struct {
 }
 
 func newSoloTestEnv(t testing.TB) *soloTestEnv {
-	evmtest.InitGoEthLogger(t)
-
 	var log *logger.Logger
 	if _, ok := t.(*testing.B); ok {
 		log = testlogger.NewSilentLogger(t.Name(), true)
@@ -54,7 +54,12 @@ func newSoloTestEnv(t testing.TB) *soloTestEnv {
 	chain, _ := s.NewChainExt(chainOwner, 0, "chain1")
 
 	accounts := jsonrpc.NewAccountManager(nil)
-	rpcsrv, err := jsonrpc.NewServer(chain.EVM(), accounts, chain.GetChainMetrics().WebAPI)
+	rpcsrv, err := jsonrpc.NewServer(
+		chain.EVM(),
+		accounts,
+		chain.GetChainMetrics().WebAPI,
+		jsonrpc.ParametersDefault(),
+	)
 	require.NoError(t, err)
 	t.Cleanup(rpcsrv.Stop)
 
@@ -83,7 +88,7 @@ func TestRPCGetBalance(t *testing.T) {
 	_, nonEmptyAddress := env.soloChain.NewEthereumAccountWithL2Funds()
 	require.Equal(
 		t,
-		env.soloChain.L2BaseTokens(isc.NewEthereumAddressAgentID(nonEmptyAddress))*1e12,
+		env.soloChain.L2BaseTokens(isc.NewEthereumAddressAgentID(env.soloChain.ChainID, nonEmptyAddress))*1e12,
 		env.Balance(nonEmptyAddress).Uint64(),
 	)
 }
@@ -278,7 +283,7 @@ func TestRPCSignTransaction(t *testing.T) {
 		From:     ethAddr,
 		To:       &to,
 		Gas:      &gas,
-		GasPrice: (*hexutil.Big)(evm.GasPrice),
+		GasPrice: (*hexutil.Big)(big.NewInt(1000)),
 		Value:    (*hexutil.Big)(big.NewInt(42)),
 		Nonce:    &nonce,
 	})
@@ -305,7 +310,7 @@ func TestRPCSendTransaction(t *testing.T) {
 	txHash := env.MustSendTransaction(&jsonrpc.SendTxArgs{
 		From:     ethAddr,
 		Gas:      &gas,
-		GasPrice: (*hexutil.Big)(evm.GasPrice),
+		GasPrice: (*hexutil.Big)(env.MustGetGasPrice()),
 		Nonce:    &nonce,
 		Data:     (*hexutil.Bytes)(&data),
 	})
@@ -333,6 +338,9 @@ func TestRPCGetTxReceipt(t *testing.T) {
 	require.EqualValues(t, big.NewInt(2), receipt.BlockNumber)
 	require.EqualValues(t, env.BlockByNumber(big.NewInt(2)).Hash(), receipt.BlockHash)
 	require.EqualValues(t, 0, receipt.TransactionIndex)
+
+	expectedGasPrice := env.soloChain.GetGasFeePolicy().GasPriceWei(parameters.L1().BaseToken.Decimals)
+	require.EqualValues(t, expectedGasPrice, receipt.EffectiveGasPrice)
 }
 
 func TestRPCGetTxReceiptMissing(t *testing.T) {
@@ -407,7 +415,7 @@ func TestRPCLogIndex(t *testing.T) {
 	value := big.NewInt(0)
 	gas := uint64(100_000)
 	tx, err := types.SignTx(
-		types.NewTransaction(env.NonceAt(creatorAddress), contractAddress, value, gas, evm.GasPrice, callArguments),
+		types.NewTransaction(env.NonceAt(creatorAddress), contractAddress, value, gas, env.MustGetGasPrice(), callArguments),
 		env.Signer(),
 		creator,
 	)
@@ -444,7 +452,7 @@ func TestRPCTxRejectedIfNotEnoughFunds(t *testing.T) {
 	value := big.NewInt(0)
 	gasLimit := uint64(10_000)
 	tx, err := types.SignTx(
-		types.NewContractCreation(nonce, value, gasLimit, evm.GasPrice, data),
+		types.NewContractCreation(nonce, value, gasLimit, env.MustGetGasPrice(), data),
 		env.Signer(),
 		creator,
 	)
@@ -454,6 +462,36 @@ func TestRPCTxRejectedIfNotEnoughFunds(t *testing.T) {
 	err = env.Client.SendTransaction(context.Background(), tx)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "sender doesn't have enough L2 funds to cover tx gas budget")
+}
+
+func TestRPCCustomError(t *testing.T) {
+	env := newSoloTestEnv(t)
+	creator, creatorAddress := env.soloChain.NewEthereumAccountWithL2Funds()
+	contractABI, err := abi.JSON(strings.NewReader(evmtest.ISCTestContractABI))
+	require.NoError(t, err)
+	_, _, contractAddress := env.DeployEVMContract(creator, contractABI, evmtest.ISCTestContractBytecode)
+
+	callArguments, err := contractABI.Pack("revertWithCustomError")
+	require.NoError(t, err)
+
+	_, err = env.Client.CallContract(context.Background(), ethereum.CallMsg{
+		From: creatorAddress,
+		To:   &contractAddress,
+		Data: callArguments,
+	}, nil)
+	require.ErrorContains(t, err, "execution reverted")
+
+	dataErr, ok := err.(rpc.DataError)
+	require.True(t, ok)
+
+	revertData, err := hexutil.Decode(dataErr.ErrorData().(string))
+	require.NoError(t, err)
+
+	args, err := evmerrors.UnpackCustomError(revertData, contractABI.Errors["CustomError"])
+	require.NoError(t, err)
+
+	require.Len(t, args, 1)
+	require.EqualValues(t, 42, args[0])
 }
 
 func BenchmarkRPCEstimateGas(b *testing.B) {

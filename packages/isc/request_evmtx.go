@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 
 	"github.com/ethereum/go-ethereum/core/types"
 
@@ -33,7 +34,7 @@ func NewEVMOffLedgerTxRequest(chainID ChainID, tx *types.Transaction) (OffLedger
 	return &evmOffLedgerTxRequest{
 		chainID: chainID,
 		tx:      tx,
-		sender:  NewEthereumAddressAgentID(sender),
+		sender:  NewEthereumAddressAgentID(chainID, sender),
 	}, nil
 }
 
@@ -54,7 +55,7 @@ func (req *evmOffLedgerTxRequest) Read(r io.Reader) error {
 	if err != nil {
 		return err
 	}
-	req.sender = NewEthereumAddressAgentID(sender)
+	req.sender = NewEthereumAddressAgentID(req.chainID, sender)
 	return rr.Err
 }
 
@@ -147,4 +148,16 @@ func (req *evmOffLedgerTxRequest) VerifySignature() error {
 		return errors.New("sender mismatch in EVM off-ledger request")
 	}
 	return nil
+}
+
+func (req *evmOffLedgerTxRequest) EVMTransaction() *types.Transaction {
+	return req.tx
+}
+
+func (req *evmOffLedgerTxRequest) EVMCallData() *EVMCallData {
+	return EVMCallDataFromTx(req.tx)
+}
+
+func (req *evmOffLedgerTxRequest) TxValue() *big.Int {
+	return req.tx.Value()
 }

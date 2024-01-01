@@ -9,9 +9,9 @@ import (
 	"math/big"
 	"math/rand"
 	"sync"
-	"testing"
 	"time"
 
+	"github.com/samber/lo"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap/zapcore"
 
@@ -22,6 +22,7 @@ import (
 	"github.com/iotaledger/wasp/packages/chain"
 	"github.com/iotaledger/wasp/packages/cryptolib"
 	"github.com/iotaledger/wasp/packages/database"
+	"github.com/iotaledger/wasp/packages/evm/evmlogger"
 	"github.com/iotaledger/wasp/packages/hashing"
 	"github.com/iotaledger/wasp/packages/isc"
 	"github.com/iotaledger/wasp/packages/isc/coreutil"
@@ -41,6 +42,7 @@ import (
 	"github.com/iotaledger/wasp/packages/vm/core/coreprocessors"
 	"github.com/iotaledger/wasp/packages/vm/core/governance"
 	"github.com/iotaledger/wasp/packages/vm/core/migrations"
+	"github.com/iotaledger/wasp/packages/vm/core/migrations/allmigrations"
 	"github.com/iotaledger/wasp/packages/vm/processors"
 	_ "github.com/iotaledger/wasp/packages/vm/sandbox"
 	"github.com/iotaledger/wasp/packages/vm/vmtypes"
@@ -55,15 +57,16 @@ const (
 // Solo is a structure which contains global parameters of the test: one per test instance
 type Solo struct {
 	// instance of the test
-	T                               testing.TB
+	T                               Context
 	logger                          *logger.Logger
 	chainStateDatabaseManager       *database.ChainStateDatabaseManager
 	utxoDB                          *utxodb.UtxoDB
-	glbMutex                        sync.RWMutex
+	chainsMutex                     sync.RWMutex
 	ledgerMutex                     sync.RWMutex
 	chains                          map[isc.ChainID]*Chain
 	processorConfig                 *processors.Config
 	disableAutoAdjustStorageDeposit bool
+	enableGasBurnLogging            bool
 	seed                            cryptolib.Seed
 	publisher                       *publisher.Publisher
 	ctx                             context.Context
@@ -128,6 +131,7 @@ type InitOptions struct {
 	AutoAdjustStorageDeposit bool
 	Debug                    bool
 	PrintStackTrace          bool
+	GasBurnLogEnabled        bool
 	Seed                     cryptolib.Seed
 	Log                      *logger.Logger
 }
@@ -138,13 +142,14 @@ func DefaultInitOptions() *InitOptions {
 		PrintStackTrace:          false,
 		Seed:                     cryptolib.Seed{},
 		AutoAdjustStorageDeposit: false, // is OFF by default
+		GasBurnLogEnabled:        true,  // is ON by default
 	}
 }
 
 // New creates an instance of the Solo environment
 // If solo is used for unit testing, 't' should be the *testing.T instance;
 // otherwise it can be either nil or an instance created with NewTestContext.
-func New(t testing.TB, initOptions ...*InitOptions) *Solo {
+func New(t Context, initOptions ...*InitOptions) *Solo {
 	opt := DefaultInitOptions()
 	if len(initOptions) > 0 {
 		opt = initOptions[0]
@@ -155,6 +160,7 @@ func New(t testing.TB, initOptions ...*InitOptions) *Solo {
 			opt.Log = testlogger.WithLevel(opt.Log, zapcore.InfoLevel, opt.PrintStackTrace)
 		}
 	}
+	evmlogger.Init(opt.Log)
 
 	chainRecordRegistryProvider, err := registry.NewChainRecordRegistryImpl("")
 	require.NoError(t, err)
@@ -175,6 +181,7 @@ func New(t testing.TB, initOptions ...*InitOptions) *Solo {
 		chains:                          make(map[isc.ChainID]*Chain),
 		processorConfig:                 coreprocessors.NewConfigWithCoreContracts(),
 		disableAutoAdjustStorageDeposit: !opt.AutoAdjustStorageDeposit,
+		enableGasBurnLogging:            opt.GasBurnLogEnabled,
 		seed:                            opt.Seed,
 		publisher:                       publisher.New(opt.Log.Named("publisher")),
 		ctx:                             ctx,
@@ -192,11 +199,25 @@ func New(t testing.TB, initOptions ...*InitOptions) *Solo {
 		ret.logger.Infof("solo publisher: %s %s %v", ev.Kind, ev.ChainID, ev.String())
 	})
 
-	go func() {
-		ret.publisher.Run(ctx)
-	}()
+	go ret.publisher.Run(ctx)
+
+	go ret.batchLoop()
 
 	return ret
+}
+
+func (env *Solo) batchLoop() {
+	for {
+		time.Sleep(50 * time.Millisecond)
+		chains := func() []*Chain {
+			env.chainsMutex.Lock()
+			defer env.chainsMutex.Unlock()
+			return lo.Values(env.chains)
+		}()
+		for _, ch := range chains {
+			ch.collateAndRunBatch()
+		}
+	}
 }
 
 func (env *Solo) GetDBHash() hashing.HashValue {
@@ -212,8 +233,8 @@ func (env *Solo) Publisher() *publisher.Publisher {
 }
 
 func (env *Solo) GetChainByName(name string) *Chain {
-	env.glbMutex.Lock()
-	defer env.glbMutex.Unlock()
+	env.chainsMutex.Lock()
+	defer env.chainsMutex.Unlock()
 	for _, ch := range env.chains {
 		if ch.Name == name {
 			return ch
@@ -343,8 +364,8 @@ func (env *Solo) NewChainExt(
 ) (*Chain, *iotago.Transaction) {
 	chData, originTx := env.deployChain(chainOriginator, initBaseTokens, name, originParams...)
 
-	env.glbMutex.Lock()
-	defer env.glbMutex.Unlock()
+	env.chainsMutex.Lock()
+	defer env.chainsMutex.Unlock()
 	ch := env.addChain(chData)
 
 	ch.log.Infof("chain '%s' deployed. Chain ID: %s", ch.Name, ch.ChainID.String())
@@ -362,10 +383,10 @@ func (env *Solo) addChain(chData chainData) *Chain {
 		proc:                   processors.MustNew(env.processorConfig),
 		log:                    env.logger.Named(chData.Name),
 		metrics:                metrics.NewChainMetricsProvider().GetChainMetrics(chData.ChainID),
-		mempool:                newMempool(env.utxoDB.GlobalTime),
+		mempool:                newMempool(env.utxoDB.GlobalTime, chData.ChainID),
+		migrationScheme:        allmigrations.DefaultScheme,
 	}
 	env.chains[chData.ChainID] = ch
-	go ch.batchLoop()
 	return ch
 }
 
@@ -377,8 +398,8 @@ func (env *Solo) AddToLedger(tx *iotago.Transaction) error {
 
 // RequestsForChain parses the transaction and returns all requests contained in it which have chainID as the target
 func (env *Solo) RequestsForChain(tx *iotago.Transaction, chainID isc.ChainID) ([]isc.Request, error) {
-	env.glbMutex.RLock()
-	defer env.glbMutex.RUnlock()
+	env.chainsMutex.RLock()
+	defer env.chainsMutex.RUnlock()
 
 	m := env.requestsByChain(tx)
 	ret, ok := m[chainID]
@@ -397,18 +418,13 @@ func (env *Solo) requestsByChain(tx *iotago.Transaction) map[isc.ChainID][]isc.R
 
 // AddRequestsToMempool adds all the requests to the chain mempool,
 func (env *Solo) AddRequestsToMempool(ch *Chain, reqs []isc.Request) {
-	env.glbMutex.RLock()
-	defer env.glbMutex.RUnlock()
-	ch.runVMMutex.Lock()
-	defer ch.runVMMutex.Unlock()
-
 	ch.mempool.ReceiveRequests(reqs...)
 }
 
 // EnqueueRequests adds requests contained in the transaction to mempools of respective target chains
 func (env *Solo) EnqueueRequests(tx *iotago.Transaction) {
-	env.glbMutex.RLock()
-	defer env.glbMutex.RUnlock()
+	env.chainsMutex.RLock()
+	defer env.chainsMutex.RUnlock()
 
 	requests := env.requestsByChain(tx)
 
@@ -418,11 +434,7 @@ func (env *Solo) EnqueueRequests(tx *iotago.Transaction) {
 			env.logger.Infof("dispatching requests. Unknown chain: %s", chainID.String())
 			continue
 		}
-		ch.runVMMutex.Lock()
-
 		ch.mempool.ReceiveRequests(reqs...)
-
-		ch.runVMMutex.Unlock()
 	}
 }
 
@@ -448,14 +460,6 @@ func (ch *Chain) collateBatch() []isc.Request {
 	}
 
 	return requests[:batchSize]
-}
-
-// batchLoop mimics behavior Wasp consensus
-func (ch *Chain) batchLoop() {
-	for {
-		ch.collateAndRunBatch()
-		time.Sleep(50 * time.Millisecond)
-	}
 }
 
 func (ch *Chain) collateAndRunBatch() {

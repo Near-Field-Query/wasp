@@ -3,6 +3,7 @@ package isc
 import (
 	"fmt"
 	"io"
+	"math/big"
 	"time"
 
 	"github.com/iotaledger/hive.go/serializer/v2"
@@ -232,12 +233,11 @@ func (req *onLedgerRequestData) SenderAccount() AgentID {
 	if sender == nil {
 		return nil
 	}
-	if req.requestMetadata != nil && req.requestMetadata.SenderContract != 0 {
-		if sender.Type() != iotago.AddressAlias {
-			panic("inconsistency: non-alias address cannot have hname != 0")
+	if req.requestMetadata != nil && !req.requestMetadata.SenderContract.Empty() {
+		if sender.Type() == iotago.AddressAlias {
+			chainID := ChainIDFromAddress(sender.(*iotago.AliasAddress))
+			return req.requestMetadata.SenderContract.AgentID(chainID)
 		}
-		chainID := ChainIDFromAddress(sender.(*iotago.AliasAddress))
-		return NewContractAgentID(chainID, req.requestMetadata.SenderContract)
 	}
 	return NewAgentID(sender)
 }
@@ -286,6 +286,14 @@ func (req *onLedgerRequestData) TimeLock() time.Time {
 		return time.Time{}
 	}
 	return time.Unix(int64(timelock.UnixTime), 0)
+}
+
+func (req *onLedgerRequestData) TxValue() *big.Int {
+	return new(big.Int).SetUint64(req.output.Deposit())
+}
+
+func (req *onLedgerRequestData) EVMCallData() *EVMCallData {
+	return nil
 }
 
 // region RetryOnLedgerRequest //////////////////////////////////////////////////////////////////

@@ -4,6 +4,7 @@
 package jsonrpc
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -16,13 +17,12 @@ import (
 	"github.com/iotaledger/wasp/packages/chainutil"
 	"github.com/iotaledger/wasp/packages/cryptolib"
 	"github.com/iotaledger/wasp/packages/isc"
-	"github.com/iotaledger/wasp/packages/kv/codec"
 	"github.com/iotaledger/wasp/packages/kv/dict"
 	"github.com/iotaledger/wasp/packages/parameters"
 	"github.com/iotaledger/wasp/packages/state"
 	"github.com/iotaledger/wasp/packages/trie"
-	"github.com/iotaledger/wasp/packages/util"
 	"github.com/iotaledger/wasp/packages/vm/core/governance"
+	"github.com/iotaledger/wasp/packages/vm/gas"
 )
 
 // WaspEVMBackend is the implementation of [ChainBackend] for the production environment.
@@ -42,13 +42,16 @@ func NewWaspEVMBackend(ch chain.Chain, nodePubKey *cryptolib.PublicKey, baseToke
 	}
 }
 
-func (b *WaspEVMBackend) EVMGasRatio() (util.Ratio32, error) {
-	// TODO: Cache the gas ratio?
-	ret, err := b.ISCCallView(b.ISCLatestState(), governance.Contract.Name, governance.ViewGetEVMGasRatio.Name, nil)
+func (b *WaspEVMBackend) FeePolicy(blockIndex uint32) (*gas.FeePolicy, error) {
+	state, err := b.ISCStateByBlockIndex(blockIndex)
 	if err != nil {
-		return util.Ratio32{}, err
+		return nil, err
 	}
-	return codec.DecodeRatio32(ret.Get(governance.ParamEVMGasRatio))
+	ret, err := b.ISCCallView(state, governance.Contract.Name, governance.ViewGetFeePolicy.Name, nil)
+	if err != nil {
+		return nil, err
+	}
+	return gas.FeePolicyFromBytes(ret.Get(governance.ParamFeePolicyBytes))
 }
 
 func (b *WaspEVMBackend) EVMSendTransaction(tx *types.Transaction) error {
@@ -140,4 +143,14 @@ func (b *WaspEVMBackend) ISCStateByTrieRoot(trieRoot trie.Hash) (state.State, er
 func (b *WaspEVMBackend) ISCChainID() *isc.ChainID {
 	chID := b.chain.ID()
 	return &chID
+}
+
+var errNotImplemented = errors.New("method not implemented")
+
+func (*WaspEVMBackend) RevertToSnapshot(int) error {
+	return errNotImplemented
+}
+
+func (*WaspEVMBackend) TakeSnapshot() (int, error) {
+	return 0, errNotImplemented
 }

@@ -6,6 +6,7 @@ package emulator
 import (
 	"fmt"
 	"math/big"
+	"slices"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -19,10 +20,10 @@ import (
 )
 
 const (
-	keyAccountNonce    = "n"
-	keyAccountCode     = "c"
-	keyAccountState    = "s"
-	keyAccountSuicided = "S"
+	keyAccountNonce          = "n"
+	keyAccountCode           = "c"
+	keyAccountState          = "s"
+	keyAccountSelfDestructed = "S"
 )
 
 func accountKey(prefix kv.Key, addr common.Address) kv.Key {
@@ -41,25 +42,27 @@ func accountStateKey(addr common.Address, hash common.Hash) kv.Key {
 	return accountKey(keyAccountState, addr) + kv.Key(hash[:])
 }
 
-func accountSuicidedKey(addr common.Address) kv.Key {
-	return accountKey(keyAccountSuicided, addr)
+func accountSelfDestructedKey(addr common.Address) kv.Key {
+	return accountKey(keyAccountSelfDestructed, addr)
 }
 
 // StateDB implements vm.StateDB with a kv.KVStore as backend.
 // The Ethereum account balance is tied to the L1 balance.
 type StateDB struct {
-	ctx    Context
-	kv     kv.KVStore // subrealm of ctx.State()
-	logs   []*types.Log
-	refund uint64
+	ctx       Context
+	kv        kv.KVStore // subrealm of ctx.State()
+	logs      []*types.Log
+	snapshots map[int][]*types.Log
+	refund    uint64
 }
 
 var _ vm.StateDB = &StateDB{}
 
 func NewStateDB(ctx Context) *StateDB {
 	return &StateDB{
-		ctx: ctx,
-		kv:  StateDBSubrealm(ctx.State()),
+		ctx:       ctx,
+		kv:        StateDBSubrealm(ctx.State()),
+		snapshots: make(map[int][]*types.Log),
 	}
 }
 
@@ -78,7 +81,8 @@ func (s *StateDB) SubBalance(addr common.Address, amount *big.Int) {
 	if amount.Sign() == -1 {
 		panic("unexpected negative amount")
 	}
-	s.ctx.SubBaseTokensBalance(addr, util.EthereumDecimalsToBaseTokenDecimals(amount, s.ctx.BaseTokensDecimals()))
+	baseTokens, _ := util.EthereumDecimalsToBaseTokenDecimals(amount, s.ctx.BaseTokensDecimals())
+	s.ctx.SubBaseTokensBalance(addr, baseTokens)
 }
 
 func (s *StateDB) AddBalance(addr common.Address, amount *big.Int) {
@@ -88,11 +92,15 @@ func (s *StateDB) AddBalance(addr common.Address, amount *big.Int) {
 	if amount.Sign() == -1 {
 		panic("unexpected negative amount")
 	}
-	s.ctx.AddBaseTokensBalance(addr, util.EthereumDecimalsToBaseTokenDecimals(amount, s.ctx.BaseTokensDecimals()))
+	baseTokens, _ := util.EthereumDecimalsToBaseTokenDecimals(amount, s.ctx.BaseTokensDecimals())
+	s.ctx.AddBaseTokensBalance(addr, baseTokens)
 }
 
 func (s *StateDB) GetBalance(addr common.Address) *big.Int {
-	return util.BaseTokensDecimalsToEthereumDecimals(s.ctx.GetBaseTokensBalance(addr), s.ctx.BaseTokensDecimals())
+	baseTokens := s.ctx.GetBaseTokensBalance(addr)
+	wei, _ := util.BaseTokensDecimalsToEthereumDecimals(baseTokens, s.ctx.BaseTokensDecimals())
+	// discard remainder
+	return wei
 }
 
 func GetNonce(s kv.KVStoreReader, addr common.Address) uint64 {
@@ -100,7 +108,12 @@ func GetNonce(s kv.KVStoreReader, addr common.Address) uint64 {
 }
 
 func (s *StateDB) GetNonce(addr common.Address) uint64 {
-	return GetNonce(s.kv, addr)
+	nonce := uint64(0)
+	// do not charge gas for this, internal checks of the emulator require this function to run before executing the request
+	s.ctx.WithoutGasBurn(func() {
+		nonce = GetNonce(s.kv, addr)
+	})
+	return nonce
 }
 
 func IncNonce(kv kv.KVStore, addr common.Address) {
@@ -184,9 +197,9 @@ func (s *StateDB) SetState(addr common.Address, key, value common.Hash) {
 	SetState(s.kv, addr, key, value)
 }
 
-func (s *StateDB) Suicide(addr common.Address) bool {
+func (s *StateDB) SelfDestruct(addr common.Address) {
 	if !s.Exist(addr) {
-		return false
+		return
 	}
 
 	s.kv.Del(accountNonceKey(addr))
@@ -202,20 +215,22 @@ func (s *StateDB) Suicide(addr common.Address) bool {
 	}
 
 	// for some reason the EVM engine calls AddBalance to the beneficiary address,
-	// but not SubBalance for the suicided address.
+	// but not SubBalance for the self-destructed address.
 	s.ctx.SubBaseTokensBalance(addr, s.ctx.GetBaseTokensBalance(addr))
 
-	s.kv.Set(accountSuicidedKey(addr), []byte{1})
-
-	return true
+	s.kv.Set(accountSelfDestructedKey(addr), []byte{1})
 }
 
-func (s *StateDB) HasSuicided(addr common.Address) bool {
-	return s.kv.Has(accountSuicidedKey(addr))
+func (s *StateDB) HasSelfDestructed(addr common.Address) bool {
+	return s.kv.Has(accountSelfDestructedKey(addr))
+}
+
+func (s *StateDB) Selfdestruct6780(addr common.Address) {
+	panic("unimplemented")
 }
 
 // Exist reports whether the given account exists in state.
-// Notably this should also return true for suicided accounts.
+// Notably this should also return true for self-destructed accounts.
 func (s *StateDB) Exist(addr common.Address) bool {
 	return s.kv.Has(accountNonceKey(addr))
 }
@@ -258,19 +273,21 @@ func (s *StateDB) AddSlotToAccessList(addr common.Address, slot common.Hash) {
 }
 
 func (s *StateDB) Snapshot() int {
-	return s.ctx.TakeSnapshot()
+	i := s.ctx.TakeSnapshot()
+	s.snapshots[i] = slices.Clone(s.logs)
+	return i
 }
 
 func (s *StateDB) RevertToSnapshot(i int) {
 	s.ctx.RevertToSnapshot(i)
+	s.logs = s.snapshots[i]
 }
 
 func (s *StateDB) AddLog(log *types.Log) {
-	log.Index = uint(len(s.logs))
 	s.logs = append(s.logs, log)
 }
 
-func (s *StateDB) GetLogs(_ common.Hash) []*types.Log {
+func (s *StateDB) GetLogs() []*types.Log {
 	return s.logs
 }
 

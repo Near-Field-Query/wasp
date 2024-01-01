@@ -41,17 +41,14 @@ type Provider func() *Chains // TODO: Use DI instead of that.
 type ChainProvider func(chainID isc.ChainID) chain.Chain
 
 type Chains struct {
-	ctx                              context.Context
-	log                              *logger.Logger
-	nodeConnection                   chain.NodeConnection
-	processorConfig                  *processors.Config
-	offledgerBroadcastUpToNPeers     int
-	offledgerBroadcastInterval       time.Duration
-	pullMissingRequestsFromCommittee bool
-	deriveAliasOutputByQuorum        bool
-	pipeliningLimit                  int
-	consensusDelay                   time.Duration
-	recoveryTimeout                  time.Duration
+	ctx                       context.Context
+	log                       *logger.Logger
+	nodeConnection            chain.NodeConnection
+	processorConfig           *processors.Config
+	deriveAliasOutputByQuorum bool
+	pipeliningLimit           int
+	consensusDelay            time.Duration
+	recoveryTimeout           time.Duration
 
 	networkProvider              peering.NetworkProvider
 	trustedNetworkManager        peering.TrustedNetworkManager
@@ -92,6 +89,9 @@ type Chains struct {
 	chainMetricsProvider *metrics.ChainMetricsProvider
 
 	validatorFeeAddr iotago.Address
+
+	mempoolTTL               time.Duration
+	mempoolBroadcastInterval time.Duration
 }
 
 type activeChain struct {
@@ -104,9 +104,6 @@ func New(
 	nodeConnection chain.NodeConnection,
 	processorConfig *processors.Config,
 	validatorAddrStr string,
-	offledgerBroadcastUpToNPeers int, // TODO: Unused for now.
-	offledgerBroadcastInterval time.Duration, // TODO: Unused for now.
-	pullMissingRequestsFromCommittee bool, // TODO: Unused for now.
 	deriveAliasOutputByQuorum bool,
 	pipeliningLimit int,
 	consensusDelay time.Duration,
@@ -135,6 +132,8 @@ func New(
 	nodeIdentityProvider registry.NodeIdentityProvider,
 	consensusStateRegistry cmt_log.ConsensusStateRegistry,
 	chainListener chain.ChainListener,
+	mempoolTTL time.Duration,
+	mempoolBroadcastInterval time.Duration,
 	shutdownCoordinator *shutdown.Coordinator,
 	chainMetricsProvider *metrics.ChainMetricsProvider,
 ) *Chains {
@@ -155,9 +154,6 @@ func New(
 		allChains:                           shrinkingmap.New[isc.ChainID, *activeChain](),
 		nodeConnection:                      nodeConnection,
 		processorConfig:                     processorConfig,
-		offledgerBroadcastUpToNPeers:        offledgerBroadcastUpToNPeers,
-		offledgerBroadcastInterval:          offledgerBroadcastInterval,
-		pullMissingRequestsFromCommittee:    pullMissingRequestsFromCommittee,
 		deriveAliasOutputByQuorum:           deriveAliasOutputByQuorum,
 		pipeliningLimit:                     pipeliningLimit,
 		consensusDelay:                      consensusDelay,
@@ -184,6 +180,8 @@ func New(
 		dkShareRegistryProvider:             dkShareRegistryProvider,
 		nodeIdentityProvider:                nodeIdentityProvider,
 		chainListener:                       nil, // See bellow.
+		mempoolTTL:                          mempoolTTL,
+		mempoolBroadcastInterval:            mempoolBroadcastInterval,
 		consensusStateRegistry:              consensusStateRegistry,
 		shutdownCoordinator:                 shutdownCoordinator,
 		chainMetricsProvider:                chainMetricsProvider,
@@ -415,6 +413,8 @@ func (c *Chains) activateWithoutLocking(chainID isc.ChainID) error { //nolint:fu
 		c.recoveryTimeout,
 		validatorAgentID,
 		stateManagerParameters,
+		c.mempoolTTL,
+		c.mempoolBroadcastInterval,
 	)
 	if err != nil {
 		chainCancel()

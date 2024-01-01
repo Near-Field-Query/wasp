@@ -91,6 +91,10 @@ func (s *contractSandbox) StateAnchor() *isc.StateAnchor {
 	return s.reqctx.vm.stateAnchor()
 }
 
+func (s *contractSandbox) RequestIndex() uint16 {
+	return s.reqctx.requestIndex
+}
+
 func (s *contractSandbox) RegisterError(messageFormat string) *isc.VMErrorTemplate {
 	return s.reqctx.registerError(messageFormat)
 }
@@ -145,17 +149,25 @@ func (s *contractSandbox) ModifyFoundrySupply(sn uint32, delta *big.Int) int64 {
 	return s.reqctx.ModifyFoundrySupply(sn, delta)
 }
 
+func (s *contractSandbox) MintNFT(addr iotago.Address, immutableMetadata []byte, issuer iotago.Address) (uint16, *iotago.NFTOutput) {
+	return s.reqctx.MintNFT(addr, immutableMetadata, issuer)
+}
+
 func (s *contractSandbox) GasBurnEnable(enable bool) {
 	s.Ctx.GasBurnEnable(enable)
 }
 
+func (s *contractSandbox) GasBurnEnabled() bool {
+	return s.Ctx.GasBurnEnabled()
+}
+
 func (s *contractSandbox) MustMoveBetweenAccounts(fromAgentID, toAgentID isc.AgentID, assets *isc.Assets) {
-	mustMoveBetweenAccounts(s.reqctx.chainStateWithGasBurn(), fromAgentID, toAgentID, assets)
+	mustMoveBetweenAccounts(s.reqctx.chainStateWithGasBurn(), fromAgentID, toAgentID, assets, s.ChainID())
 	s.checkRemainingTokens(fromAgentID)
 }
 
 func (s *contractSandbox) DebitFromAccount(agentID isc.AgentID, tokens *isc.Assets) {
-	debitFromAccount(s.reqctx.chainStateWithGasBurn(), agentID, tokens)
+	debitFromAccount(s.reqctx.chainStateWithGasBurn(), agentID, tokens, s.ChainID())
 	s.checkRemainingTokens(agentID)
 }
 
@@ -170,7 +182,7 @@ func (s *contractSandbox) checkRemainingTokens(debitedAccount isc.AgentID) {
 }
 
 func (s *contractSandbox) CreditToAccount(agentID isc.AgentID, tokens *isc.Assets) {
-	creditToAccount(s.reqctx.chainStateWithGasBurn(), agentID, tokens)
+	creditToAccount(s.reqctx.chainStateWithGasBurn(), agentID, tokens, s.ChainID())
 }
 
 func (s *contractSandbox) RetryUnprocessable(req isc.Request, outputID iotago.OutputID) {
@@ -188,6 +200,11 @@ func (s *contractSandbox) totalGasTokens() *isc.Assets {
 func (s *contractSandbox) CallOnBehalfOf(caller isc.AgentID, target, entryPoint isc.Hname, params dict.Dict, transfer *isc.Assets) dict.Dict {
 	s.Ctx.GasBurn(gas.BurnCodeCallContract)
 	return s.reqctx.CallOnBehalfOf(caller, target, entryPoint, params, transfer)
+}
+
+func (s *contractSandbox) SendOnBehalfOf(caller isc.ContractIdentity, metadata isc.RequestParameters) {
+	s.Ctx.GasBurn(gas.BurnCodeSendL1Request)
+	s.reqctx.SendOnBehalfOf(caller, metadata)
 }
 
 func (s *contractSandbox) OnWriteReceipt(f isc.CoreCallbackFunc) {

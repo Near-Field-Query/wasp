@@ -8,16 +8,15 @@ import "github.com/iotaledger/wasp/packages/cryptolib"
 type ModifyNodesConfigFn = func(nodeIndex int, configParams WaspConfigParams) WaspConfigParams
 
 type WaspConfigParams struct {
-	APIPort                      int
-	PeeringPort                  int
-	L1INXAddress                 string
-	ProfilingPort                int
-	MetricsPort                  int
-	OffledgerBroadcastUpToNPeers int // TODO this is unused, should it be removed?
-	ValidatorKeyPair             *cryptolib.KeyPair
-	ValidatorAddress             string // bech32 encoded address of ValidatorKeyPair
-	PruningMinStatesToKeep       int
-	AuthScheme                   string
+	APIPort                int
+	PeeringPort            int
+	L1INXAddress           string
+	ProfilingPort          int
+	MetricsPort            int
+	ValidatorKeyPair       *cryptolib.KeyPair
+	ValidatorAddress       string // bech32 encoded address of ValidatorKeyPair
+	PruningMinStatesToKeep int
+	AuthScheme             string
 }
 
 var WaspConfig = `
@@ -83,7 +82,7 @@ var WaspConfig = `
     }
   },
   "peering": {
-    "peeringURL": "0.0.0.0:{{.PeeringPort}}",
+    "peeringURL": "localhost:{{.PeeringPort}}",
     "port": {{.PeeringPort}}
   },
   "chains": {
@@ -133,7 +132,7 @@ var WaspConfig = `
   },
   "profiling": {
     "enabled": false,
-    "bindAddress": "0.0.0.0:{{.ProfilingPort}}" 
+    "bindAddress": "0.0.0.0:{{.ProfilingPort}}"
   },
   "profilingRecorder": {
     "enabled": false

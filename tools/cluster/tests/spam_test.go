@@ -24,7 +24,6 @@ import (
 	"github.com/iotaledger/wasp/packages/solo"
 	"github.com/iotaledger/wasp/packages/testutil"
 	"github.com/iotaledger/wasp/packages/testutil/utxodb"
-	"github.com/iotaledger/wasp/packages/vm/core/evm"
 )
 
 // executed in cluster_test.go
@@ -251,7 +250,7 @@ func testSpamEVM(t *testing.T, env *ChainEnv) {
 	keyPair, _, err := env.Clu.NewKeyPairWithFunds()
 	require.NoError(t, err)
 	evmPvtKey, evmAddr := solo.NewEthereumAccount()
-	evmAgentID := isc.NewEthereumAddressAgentID(evmAddr)
+	evmAgentID := isc.NewEthereumAddressAgentID(env.Chain.ChainID, evmAddr)
 	env.TransferFundsTo(isc.NewAssetsBaseTokens(utxodb.FundsFromFaucetAmount-1*isc.Million), nil, keyPair, evmAgentID)
 
 	// deploy solidity inccounter
@@ -268,7 +267,7 @@ func testSpamEVM(t *testing.T, env *ChainEnv) {
 		callArguments, err2 := storageContractABI.Pack("store", uint32(i))
 		require.NoError(t, err2)
 		tx, err2 := types.SignTx(
-			types.NewTransaction(nonce+i, storageContractAddr, big.NewInt(0), 100000, evm.GasPrice, callArguments),
+			types.NewTransaction(nonce+i, storageContractAddr, big.NewInt(0), 100000, env.GetGasPriceEVM(), callArguments),
 			EVMSigner(),
 			evmPvtKey,
 		)

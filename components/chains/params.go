@@ -8,13 +8,18 @@ import (
 
 type ParametersChains struct {
 	BroadcastUpToNPeers              int           `default:"2" usage:"number of peers an offledger request is broadcasted to"`
-	BroadcastInterval                time.Duration `default:"5s" usage:"time between re-broadcast of offledger requests"`
+	BroadcastInterval                time.Duration `default:"0s" usage:"time between re-broadcast of offledger requests; 0 value means that re-broadcasting is disabled"`
 	APICacheTTL                      time.Duration `default:"300s" usage:"time to keep processed offledger requests in api cache"`
 	PullMissingRequestsFromCommittee bool          `default:"true" usage:"whether or not to pull missing requests from other committee members"`
 	DeriveAliasOutputByQuorum        bool          `default:"true" usage:"false means we propose own AliasOutput, true - by majority vote."`
 	PipeliningLimit                  int           `default:"-1" usage:"-1 -- infinite, 0 -- disabled, X -- build the chain if there is up to X transactions unconfirmed by L1."`
 	ConsensusDelay                   time.Duration `default:"500ms" usage:"Minimal delay between consensus runs."`
 	RecoveryTimeout                  time.Duration `default:"20s" usage:"Time after which another consensus attempt is made."`
+	RedeliveryPeriod                 time.Duration `default:"2s" usage:"the resend period for msg."`
+	PrintStatusPeriod                time.Duration `default:"3s" usage:"the period to print consensus instance status."`
+	ConsensusInstsInAdvance          int           `default:"3" usage:""`
+	AwaitReceiptCleanupEvery         int           `default:"100" usage:"for every this number AwaitReceipt will be cleaned up"`
+	MempoolTTL                       time.Duration `default:"24h" usage:"Time that requests are allowed to sit in the mempool without being processed"`
 }
 
 type ParametersWAL struct {
@@ -39,7 +44,7 @@ type ParametersStateManager struct {
 }
 
 type ParametersSnapshotManager struct {
-	SnapshotsToLoad []string `default:"0" usage:"list of snapshots to load; can be either single block hash of a snapshot (if a single chain has to be configured) or list of '<chainID>:<blockHash>' to configure many chains"`
+	SnapshotsToLoad []string `default:"" usage:"list of snapshots to load; can be either single block hash of a snapshot (if a single chain has to be configured) or list of '<chainID>:<blockHash>' to configure many chains"`
 	Period          uint32   `default:"0" usage:"how often state snapshots should be made: 1000 meaning \"every 1000th state\", 0 meaning \"making snapshots is disabled\""`
 	Delay           uint32   `default:"20" usage:"how many states should pass before snapshot is produced"`
 	LocalPath       string   `default:"waspdb/snap" usage:"the path to the snapshots folder in this node's disk"`

@@ -20,10 +20,11 @@ import (
 	iotago "github.com/iotaledger/iota.go/v3"
 	"github.com/iotaledger/wasp/clients/apiclient"
 	"github.com/iotaledger/wasp/packages/kv/codec"
+	"github.com/iotaledger/wasp/packages/parameters"
+	"github.com/iotaledger/wasp/packages/testutil/testkey"
 	"github.com/iotaledger/wasp/packages/vm/core/accounts"
 	"github.com/iotaledger/wasp/packages/vm/core/blob"
 	"github.com/iotaledger/wasp/packages/vm/core/blocklog"
-	"github.com/iotaledger/wasp/packages/vm/core/evm"
 	"github.com/iotaledger/wasp/packages/vm/gas"
 	"github.com/iotaledger/wasp/packages/vm/vmtypes"
 	"github.com/iotaledger/wasp/tools/cluster/templates"
@@ -72,11 +73,15 @@ func TestZeroGasFee(t *testing.T) {
 	outs, err := w.Run("chain", "info", "--node=0", "--node=0")
 	require.NoError(t, err)
 	require.Contains(t, outs, "Gas fee: gas units * (100/1)")
-	_, err = w.Run("chain", "disable-gas-policy", "--node=0")
+	_, err = w.Run("chain", "disable-feepolicy", "--node=0")
 	require.NoError(t, err)
 	outs, err = w.Run("chain", "info", "--node=0", "--node=0")
 	require.NoError(t, err)
 	require.Contains(t, outs, "Gas fee: gas units * (0/0)")
+
+	alternativeAddress := getAddress(w.MustRun("address", "--address-index=1"))
+	w.MustRun("send-funds", "-s", alternativeAddress, "base:1000000")
+	checkBalance(t, w.MustRun("balance", "--address-index=1"), 1000000)
 }
 
 func TestWaspCLI1Chain(t *testing.T) {
@@ -844,9 +849,10 @@ func TestEVMISCReceipt(t *testing.T) {
 	w.MustRun("chain", "deposit", ethAddr.String(), "base:100000000", "--node=0")
 
 	// send some arbitrary EVM tx
+	gasPrice := gas.DefaultFeePolicy().GasPriceWei(parameters.L1().BaseToken.Decimals)
 	jsonRPCClient := NewEVMJSONRPClient(t, w.ChainID(0), w.Cluster, 0)
 	tx, err := types.SignTx(
-		types.NewTransaction(0, ethAddr, big.NewInt(123), 100000, evm.GasPrice, []byte{}),
+		types.NewTransaction(0, ethAddr, big.NewInt(123), 100000, gasPrice, []byte{}),
 		EVMSigner(),
 		ethPvtKey,
 	)
@@ -855,4 +861,20 @@ func TestEVMISCReceipt(t *testing.T) {
 	require.NoError(t, err)
 	out := w.MustRun("chain", "request", tx.Hash().Hex(), "--node=0")
 	require.Contains(t, out[0], "Request found in block")
+}
+
+func TestChangeGovernanceController(t *testing.T) {
+	w := newWaspCLITest(t)
+	committee, quorum := w.ArgCommitteeConfig(0)
+	w.MustRun("chain", "deploy", "--chain=chain1", committee, quorum, "--node=0")
+	w.ActivateChainOnAllNodes("chain1", 0)
+
+	// create the new controller
+	_, newGovControllerAddr := testkey.GenKeyAddr()
+	// change gov controller
+	w.MustRun("chain", "change-gov-controller", newGovControllerAddr.Bech32("atoi"), "--chain=chain1")
+
+	outputs, err := w.Cluster.L1Client().OutputMap(newGovControllerAddr)
+	require.NoError(t, err)
+	require.Len(t, outputs, 1)
 }

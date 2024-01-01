@@ -5,17 +5,27 @@ package solo
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"errors"
 	"fmt"
+	"io"
 	"math"
+	"math/big"
 	"os"
+	"strings"
 	"time"
 
+	"github.com/ethereum/go-ethereum"
+	"github.com/ethereum/go-ethereum/accounts/abi"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/stretchr/testify/require"
 
 	iotago "github.com/iotaledger/iota.go/v3"
 	"github.com/iotaledger/wasp/packages/chain"
 	"github.com/iotaledger/wasp/packages/cryptolib"
+	"github.com/iotaledger/wasp/packages/evm/evmutil"
 	"github.com/iotaledger/wasp/packages/hashing"
 	"github.com/iotaledger/wasp/packages/isc"
 	"github.com/iotaledger/wasp/packages/kv"
@@ -274,6 +284,40 @@ func (ch *Chain) DeployWasmContract(keyPair *cryptolib.KeyPair, name, fname stri
 	return ch.DeployContract(keyPair, name, hprog, params...)
 }
 
+// DeployEVMContract deploys an evm contract on the chain
+func (ch *Chain) DeployEVMContract(creator *ecdsa.PrivateKey, abiJSON string, bytecode []byte, value *big.Int, args ...interface{}) (common.Address, abi.ABI) {
+	creatorAddress := crypto.PubkeyToAddress(creator.PublicKey)
+
+	nonce := ch.Nonce(isc.NewEthereumAddressAgentID(ch.ChainID, creatorAddress))
+
+	contractABI, err := abi.JSON(strings.NewReader(abiJSON))
+	require.NoError(ch.Env.T, err)
+	constructorArguments, err := contractABI.Pack("", args...)
+	require.NoError(ch.Env.T, err)
+
+	data := []byte{}
+	data = append(data, bytecode...)
+	data = append(data, constructorArguments...)
+
+	gasLimit, err := ch.EVM().EstimateGas(ethereum.CallMsg{
+		From:  creatorAddress,
+		Value: value,
+		Data:  data,
+	}, nil)
+	require.NoError(ch.Env.T, err)
+
+	tx, err := types.SignTx(
+		types.NewContractCreation(nonce, value, gasLimit, ch.EVM().GasPrice(), data),
+		evmutil.Signer(big.NewInt(int64(ch.EVM().ChainID()))),
+		creator,
+	)
+	require.NoError(ch.Env.T, err)
+
+	err = ch.EVM().SendTransaction(tx)
+	require.NoError(ch.Env.T, err)
+	return crypto.CreateAddress(creatorAddress, nonce), contractABI
+}
+
 // GetInfo return main parameters of the chain:
 //   - chainID
 //   - agentID of the chain owner
@@ -399,12 +443,13 @@ func (ch *Chain) GetRequestReceipt(reqID isc.RequestID) (*blocklog.RequestReceip
 	if err != nil || binRec == nil {
 		return nil, err
 	}
-	ret1, err := blocklog.RequestReceiptFromBytes(binRec)
 
+	ret1, err := blocklog.RequestReceiptFromBytes(
+		binRec,
+		resultDecoder.MustGetUint32(blocklog.ParamBlockIndex),
+		resultDecoder.MustGetUint16(blocklog.ParamRequestIndex),
+	)
 	require.NoError(ch.Env.T, err)
-	ret1.BlockIndex = resultDecoder.MustGetUint32(blocklog.ParamBlockIndex)
-	ret1.RequestIndex = resultDecoder.MustGetUint16(blocklog.ParamRequestIndex)
-
 	return ret1, nil
 }
 
@@ -566,10 +611,10 @@ func (ch *Chain) L1L2Funds(addr iotago.Address) *L1L2AddressAssets {
 func (ch *Chain) GetL2FundsFromFaucet(agentID isc.AgentID, baseTokens ...uint64) {
 	// find a deterministic L1 address that has 0 balance
 	walletKey, walletAddr := func() (*cryptolib.KeyPair, iotago.Address) {
-		seed := cryptolib.SeedFromBytes([]byte("GetL2FundsFromFaucet"))
-		i := uint64(0)
+		masterSeed := []byte("GetL2FundsFromFaucet")
+		i := uint32(0)
 		for {
-			ss := seed.SubSeed(i)
+			ss := cryptolib.SubSeed(masterSeed, i)
 			key, addr := ch.Env.NewKeyPair(&ss)
 			_, err := ch.Env.GetFundsFromFaucet(addr)
 			require.NoError(ch.Env.T, err)
@@ -697,4 +742,8 @@ func (*Chain) AwaitRequestProcessed(ctx context.Context, requestID isc.RequestID
 
 func (ch *Chain) LatestBlockIndex() uint32 {
 	return ch.GetLatestBlockInfo().BlockIndex()
+}
+
+func (ch *Chain) GetMempoolContents() io.Reader {
+	panic("unimplemented")
 }

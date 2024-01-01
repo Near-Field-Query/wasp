@@ -59,6 +59,11 @@ func initConfigParams(c *dig.Container) error {
 		Component.LogPanic(err)
 	}
 
+	chain.RedeliveryPeriod = ParamsChains.RedeliveryPeriod
+	chain.PrintStatusPeriod = ParamsChains.PrintStatusPeriod
+	chain.ConsensusInstsInAdvance = ParamsChains.ConsensusInstsInAdvance
+	chain.AwaitReceiptCleanupEvery = ParamsChains.AwaitReceiptCleanupEvery
+
 	return nil
 }
 
@@ -92,9 +97,6 @@ func provide(c *dig.Container) error {
 				deps.NodeConnection,
 				deps.ProcessorsConfig,
 				ParamsValidator.Address,
-				ParamsChains.BroadcastUpToNPeers,
-				ParamsChains.BroadcastInterval,
-				ParamsChains.PullMissingRequestsFromCommittee,
 				ParamsChains.DeriveAliasOutputByQuorum,
 				ParamsChains.PipeliningLimit,
 				ParamsChains.ConsensusDelay,
@@ -123,6 +125,8 @@ func provide(c *dig.Container) error {
 				deps.NodeIdentityProvider,
 				deps.ConsensusStateRegistry,
 				deps.ChainListener,
+				ParamsChains.MempoolTTL,
+				ParamsChains.BroadcastInterval,
 				shutdown.NewCoordinator("chains", Component.Logger().Named("Shutdown")),
 				deps.ChainMetricsProvider,
 			),

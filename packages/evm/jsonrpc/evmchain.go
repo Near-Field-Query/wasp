@@ -57,6 +57,11 @@ type NewBlockEvent struct {
 	logs  []*types.Log
 }
 
+type LogsLimits struct {
+	MaxBlocksInLogsFilterRange int
+	MaxLogsInResult            int
+}
+
 func NewEVMChain(
 	backend ChainBackend,
 	pub *publisher.Publisher,
@@ -165,7 +170,7 @@ func (e *EVMChain) gasLimits() *gas.Limits {
 func (e *EVMChain) SendTransaction(tx *types.Transaction) error {
 	e.log.Debugf("SendTransaction(tx=%v)", tx)
 	chainID := e.ChainID()
-	if tx.ChainId().Uint64() != uint64(chainID) {
+	if tx.Protected() && tx.ChainId().Uint64() != uint64(chainID) {
 		return errors.New("chain ID mismatch")
 	}
 	signer, err := e.Signer()
@@ -185,24 +190,28 @@ func (e *EVMChain) SendTransaction(tx *types.Transaction) error {
 		return fmt.Errorf("invalid transaction nonce: got %d, want %d", tx.Nonce(), expectedNonce)
 	}
 
-	if err := e.checkEnoughL2FundsForGasBudget(sender, tx.Gas()); err != nil {
+	gasFeePolicy := e.GasFeePolicy()
+	if err := e.checkEnoughL2FundsForGasBudget(sender, tx.Gas(), gasFeePolicy); err != nil {
+		return err
+	}
+	if err := evmutil.CheckGasPrice(tx, gasFeePolicy); err != nil {
 		return err
 	}
 	return e.backend.EVMSendTransaction(tx)
 }
 
-func (e *EVMChain) checkEnoughL2FundsForGasBudget(sender common.Address, evmGas uint64) error {
-	gasRatio := e.GasRatio()
+func (e *EVMChain) checkEnoughL2FundsForGasBudget(sender common.Address, evmGas uint64, gasFeePolicy *gas.FeePolicy) error {
+	gasRatio := gasFeePolicy.EVMGasRatio
 	balance, err := e.Balance(sender, nil)
 	if err != nil {
 		return fmt.Errorf("could not fetch sender balance: %w", err)
 	}
-	gasFeePolicy := e.GasFeePolicy()
-	iscGasBudgetAffordable := gasFeePolicy.GasBudgetFromTokens(balance.Uint64())
-
-	iscGasBudgetTx := gas.EVMGasToISC(evmGas, &gasRatio)
 
 	gasLimits := e.gasLimits()
+
+	iscGasBudgetAffordable := gasFeePolicy.GasBudgetFromTokens(balance.Uint64(), gasLimits)
+
+	iscGasBudgetTx := gas.EVMGasToISC(evmGas, &gasRatio)
 
 	if iscGasBudgetTx > gasLimits.MaxGasPerRequest {
 		iscGasBudgetTx = gasLimits.MaxGasPerRequest
@@ -295,8 +304,14 @@ func (e *EVMChain) Balance(address common.Address, blockNumberOrHash *rpc.BlockN
 		return nil, err
 	}
 	accountsPartition := subrealm.NewReadOnly(chainState, kv.Key(accounts.Contract.Hname().Bytes()))
-	baseTokens := accounts.GetBaseTokensBalance(accountsPartition, isc.NewEthereumAddressAgentID(address))
-	return util.BaseTokensDecimalsToEthereumDecimals(baseTokens, parameters.L1().BaseToken.Decimals), nil
+	baseTokens := accounts.GetBaseTokensBalance(
+		accountsPartition,
+		isc.NewEthereumAddressAgentID(*e.backend.ISCChainID(), address),
+		*e.backend.ISCChainID(),
+	)
+	ether, _ := util.BaseTokensDecimalsToEthereumDecimals(baseTokens, parameters.L1().BaseToken.Decimals)
+	// discard remainder
+	return ether, nil
 }
 
 func (e *EVMChain) Code(address common.Address, blockNumberOrHash *rpc.BlockNumberOrHash) ([]byte, error) {
@@ -438,27 +453,7 @@ func (e *EVMChain) EstimateGas(callMsg ethereum.CallMsg, blockNumberOrHash *rpc.
 
 func (e *EVMChain) GasPrice() *big.Int {
 	e.log.Debugf("GasPrice()")
-
-	iscState := e.backend.ISCLatestState()
-	governancePartition := subrealm.NewReadOnly(iscState, kv.Key(governance.Contract.Hname().Bytes()))
-	feePolicy := governance.MustGetGasFeePolicy(governancePartition)
-
-	// special case '0:0' for free request
-	if feePolicy.GasPerToken.IsZero() {
-		return big.NewInt(0)
-	}
-
-	// convert to wei (18 decimals)
-	decimalsDifference := 18 - parameters.L1().BaseToken.Decimals
-	price := big.NewInt(10)
-	price.Exp(price, new(big.Int).SetUint64(uint64(decimalsDifference)), nil)
-
-	price.Mul(price, new(big.Int).SetUint64(uint64(feePolicy.GasPerToken.B)))
-	price.Div(price, new(big.Int).SetUint64(uint64(feePolicy.GasPerToken.A)))
-	price.Mul(price, new(big.Int).SetUint64(uint64(feePolicy.EVMGasRatio.A)))
-	price.Div(price, new(big.Int).SetUint64(uint64(feePolicy.EVMGasRatio.B)))
-
-	return price
+	return e.GasFeePolicy().GasPriceWei(parameters.L1().BaseToken.Decimals)
 }
 
 func (e *EVMChain) StorageAt(address common.Address, key common.Hash, blockNumberOrHash *rpc.BlockNumberOrHash) (common.Hash, error) {
@@ -488,16 +483,11 @@ func (e *EVMChain) BlockTransactionCountByNumber(blockNumber *big.Int) (uint64, 
 	return uint64(len(block.Transactions())), nil
 }
 
-const (
-	maxBlocksInFilterRange = 1_000
-	maxLogsInResult        = 10_000
-)
-
 // Logs executes a log filter operation, blocking during execution and
 // returning all the results in one batch.
 //
 //nolint:gocyclo
-func (e *EVMChain) Logs(query *ethereum.FilterQuery) ([]*types.Log, error) {
+func (e *EVMChain) Logs(query *ethereum.FilterQuery, params *LogsLimits) ([]*types.Log, error) {
 	e.log.Debugf("Logs(q=%v)", query)
 	logs := make([]*types.Log, 0)
 
@@ -511,7 +501,7 @@ func (e *EVMChain) Logs(query *ethereum.FilterQuery) ([]*types.Log, error) {
 		}
 		db := blockchainDB(state)
 		receipts := db.GetReceiptsByBlockNumber(uint64(state.BlockIndex()))
-		err = filterAndAppendToLogs(query, receipts, &logs)
+		err = filterAndAppendToLogs(query, receipts, &logs, params.MaxLogsInResult)
 		if err != nil {
 			return nil, err
 		}
@@ -538,7 +528,7 @@ func (e *EVMChain) Logs(query *ethereum.FilterQuery) ([]*types.Log, error) {
 	{
 		from := from.Uint64()
 		to := to.Uint64()
-		if to > from && to-from > maxBlocksInFilterRange {
+		if to > from && to-from > uint64(params.MaxBlocksInLogsFilterRange) {
 			return nil, errors.New("too many blocks in filter range")
 		}
 		for i := from; i <= to; i++ {
@@ -550,6 +540,7 @@ func (e *EVMChain) Logs(query *ethereum.FilterQuery) ([]*types.Log, error) {
 				query,
 				blockchainDB(state).GetReceiptsByBlockNumber(i),
 				&logs,
+				params.MaxLogsInResult,
 			)
 			if err != nil {
 				return nil, err
@@ -559,8 +550,11 @@ func (e *EVMChain) Logs(query *ethereum.FilterQuery) ([]*types.Log, error) {
 	return logs, nil
 }
 
-func filterAndAppendToLogs(query *ethereum.FilterQuery, receipts []*types.Receipt, logs *[]*types.Log) error {
+func filterAndAppendToLogs(query *ethereum.FilterQuery, receipts []*types.Receipt, logs *[]*types.Log, maxLogsInResult int) error {
 	for _, r := range receipts {
+		if r.Status == types.ReceiptStatusFailed {
+			continue
+		}
 		if !evmtypes.BloomFilter(r.Bloom, query.Addresses, query.Topics) {
 			continue
 		}
@@ -620,28 +614,8 @@ func (e *EVMChain) iscRequestsInBlock(evmBlockNumber uint64) (*blocklog.BlockInf
 		return nil, nil, err
 	}
 	iscBlockIndex := iscState.BlockIndex()
-	reqIDs, err := blocklog.GetRequestIDsForBlock(iscState, iscBlockIndex)
-	if err != nil {
-		return nil, nil, err
-	}
-	reqs := make([]isc.Request, len(reqIDs))
-	for i, reqID := range reqIDs {
-		var receipt *blocklog.RequestReceipt
-		receipt, err = blocklog.GetRequestReceipt(iscState, reqID)
-		if err != nil {
-			return nil, nil, err
-		}
-		reqs[i] = receipt.Request
-	}
 	blocklogStatePartition := subrealm.NewReadOnly(iscState, kv.Key(blocklog.Contract.Hname().Bytes()))
-	block, ok := blocklog.GetBlockInfo(blocklogStatePartition, iscBlockIndex)
-	if !ok {
-		return nil, nil, fmt.Errorf("block not found: %d", evmBlockNumber)
-	}
-	if err != nil {
-		return nil, nil, err
-	}
-	return block, reqs, nil
+	return blocklog.GetRequestsInBlock(blocklogStatePartition, iscBlockIndex)
 }
 
 func (e *EVMChain) TraceTransaction(txHash common.Hash, config *tracers.TraceConfig) (any, error) {

@@ -11,6 +11,7 @@ import (
 	"math/big"
 
 	"github.com/ethereum/go-ethereum"
+	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -18,7 +19,6 @@ import (
 
 	iotago "github.com/iotaledger/iota.go/v3"
 	"github.com/iotaledger/wasp/packages/evm/evmutil"
-	"github.com/iotaledger/wasp/packages/vm/core/evm"
 )
 
 // RPCTransaction represents a transaction that will serialize to the RPC representation of a transaction
@@ -158,43 +158,46 @@ func parseBlockNumber(bn rpc.BlockNumber) *big.Int {
 	return big.NewInt(n)
 }
 
-func RPCMarshalReceipt(r *types.Receipt, tx *types.Transaction) map[string]interface{} {
+func RPCMarshalReceipt(r *types.Receipt, tx *types.Transaction, effectiveGasPrice *big.Int) map[string]interface{} {
+	// fix for an already fixed bug where some old failed receipts contain non-empty logs
+	if r.Status != types.ReceiptStatusSuccessful {
+		r.Logs = []*types.Log{}
+		r.Bloom = types.CreateBloom(types.Receipts{r})
+	}
+
 	return map[string]interface{}{
 		"transactionHash":   r.TxHash,
 		"transactionIndex":  hexutil.Uint64(r.TransactionIndex),
 		"blockHash":         r.BlockHash,
 		"blockNumber":       (*hexutil.Big)(r.BlockNumber),
-		"from":              evmutil.MustGetSender(tx),
+		"from":              evmutil.MustGetSenderIfTxSigned(tx),
 		"to":                tx.To(),
 		"cumulativeGasUsed": hexutil.Uint64(r.CumulativeGasUsed),
 		"gasUsed":           hexutil.Uint64(r.GasUsed),
+		"effectiveGasPrice": hexutil.EncodeBig(effectiveGasPrice),
 		"contractAddress":   r.ContractAddress,
-		"logs":              RPCMarshalLogs(r),
+		"logs":              rpcMarshalLogs(r),
 		"logsBloom":         r.Bloom,
 		"status":            hexutil.Uint64(r.Status),
+		"type":              hexutil.Uint64(types.LegacyTxType),
 	}
 }
 
-func RPCMarshalLogs(r *types.Receipt) []interface{} {
+func rpcMarshalLogs(r *types.Receipt) []interface{} {
 	ret := make([]interface{}, len(r.Logs))
-	for i := range r.Logs {
-		ret[i] = RPCMarshalLog(r, uint(i))
+	for i, log := range r.Logs {
+		ret[i] = map[string]interface{}{
+			"logIndex":         hexutil.Uint(log.Index),
+			"blockNumber":      hexutil.Uint(log.BlockNumber),
+			"blockHash":        log.BlockHash,
+			"transactionHash":  log.TxHash,
+			"transactionIndex": hexutil.Uint(log.TxIndex),
+			"address":          log.Address,
+			"data":             hexutil.Bytes(log.Data),
+			"topics":           log.Topics,
+		}
 	}
 	return ret
-}
-
-func RPCMarshalLog(r *types.Receipt, logIndex uint) map[string]interface{} {
-	log := r.Logs[logIndex]
-	return map[string]interface{}{
-		"logIndex":         hexutil.Uint64(logIndex),
-		"blockNumber":      (*hexutil.Big)(r.BlockNumber),
-		"blockHash":        r.BlockHash,
-		"transactionHash":  r.TxHash,
-		"transactionIndex": hexutil.Uint64(r.TransactionIndex),
-		"address":          log.Address,
-		"data":             hexutil.Bytes(log.Data),
-		"topics":           log.Topics,
-	}
 }
 
 type RPCCallArgs struct {
@@ -237,7 +240,7 @@ type SendTxArgs struct {
 // setDefaults is a helper function that fills in default values for unspecified tx fields.
 func (args *SendTxArgs) setDefaults(e *EthService) error {
 	if args.GasPrice == nil {
-		args.GasPrice = (*hexutil.Big)(evm.GasPrice)
+		args.GasPrice = (*hexutil.Big)(e.evmChain.GasPrice())
 	}
 	if args.Value == nil {
 		args.Value = new(hexutil.Big)
@@ -402,4 +405,32 @@ func decodeTopic(s string) (common.Hash, error) {
 		err = fmt.Errorf("hex has invalid length %d after decoding; expected %d for topic", len(b), common.HashLength)
 	}
 	return common.BytesToHash(b), err
+}
+
+type revertError struct {
+	error
+	reason string // revert reason hex encoded
+}
+
+// ErrorCode returns the JSON error code for a revertal.
+// See: https://github.com/ethereum/wiki/wiki/JSON-RPC-Error-Codes-Improvement-Proposal
+func (e *revertError) ErrorCode() int {
+	return 3
+}
+
+// ErrorData returns the hex encoded revert reason.
+func (e *revertError) ErrorData() interface{} {
+	return e.reason
+}
+
+func newRevertError(revertData []byte) *revertError {
+	reason, errUnpack := abi.UnpackRevert(revertData)
+	err := errors.New("execution reverted")
+	if errUnpack == nil {
+		err = fmt.Errorf("execution reverted: %v", reason)
+	}
+	return &revertError{
+		error:  err,
+		reason: hexutil.Encode(revertData),
+	}
 }

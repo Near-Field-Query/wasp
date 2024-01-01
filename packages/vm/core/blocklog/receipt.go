@@ -1,6 +1,7 @@
 package blocklog
 
 import (
+	"errors"
 	"fmt"
 	"io"
 
@@ -29,25 +30,34 @@ type RequestReceipt struct {
 	GasBurnLog   *gas.BurnLog `json:"-"`
 }
 
-func RequestReceiptFromBytes(data []byte) (*RequestReceipt, error) {
-	return rwutil.ReadFromBytes(data, new(RequestReceipt))
+func RequestReceiptFromBytes(data []byte, blockIndex uint32, reqIndex uint16) (*RequestReceipt, error) {
+	rec, err := rwutil.ReadFromBytes(data, new(RequestReceipt))
+	if err != nil {
+		return nil, err
+	}
+	rec.BlockIndex = blockIndex
+	rec.RequestIndex = reqIndex
+	return rec, nil
 }
 
 func RequestReceiptsFromBlock(block state.Block) ([]*RequestReceipt, error) {
-	var respErr error
 	receipts := []*RequestReceipt{}
-	kvStore := subrealm.NewReadOnly(block.MutationsReader(), kv.Key(Contract.Hname().Bytes()))
-	kvStore.Iterate(kv.Key(prefixRequestReceipts+"."), func(key kv.Key, value []byte) bool { // TODO: Nicer way to construct the key?
-		receipt, err := RequestReceiptFromBytes(value)
+	partition := subrealm.NewReadOnly(block.MutationsReader(), kv.Key(Contract.Hname().Bytes()))
+
+	blockInfo, ok := GetBlockInfo(partition, block.StateIndex())
+	if !ok {
+		return nil, errors.New("inconsistency: BlockInfo not found in block mutations")
+	}
+	for reqIdx := uint16(0); reqIdx < blockInfo.TotalRequests; reqIdx++ {
+		recBin, found := getRequestRecordDataByRef(partition, block.StateIndex(), reqIdx)
+		if !found {
+			return nil, errors.New("inconsistency: request log record wasn't found by exact reference")
+		}
+		receipt, err := RequestReceiptFromBytes(recBin, block.StateIndex(), reqIdx)
 		if err != nil {
-			respErr = fmt.Errorf("cannot deserialize requestReceipt: %w", err)
-			return true
+			return nil, fmt.Errorf("cannot deserialize requestReceipt: %w", err)
 		}
 		receipts = append(receipts, receipt)
-		return true
-	})
-	if respErr != nil {
-		return nil, respErr
 	}
 	return receipts, nil
 }
@@ -68,6 +78,11 @@ func (rec *RequestReceipt) Read(r io.Reader) error {
 		rec.Error = new(isc.UnresolvedVMError)
 		rr.Read(rec.Error)
 	}
+	if len(rr.Bytes()) != 0 {
+		rec.GasBurnLog = new(gas.BurnLog)
+		rr.Read(rec.GasBurnLog)
+	}
+
 	return rr.Err
 }
 
@@ -82,13 +97,10 @@ func (rec *RequestReceipt) Write(w io.Writer) error {
 	if rec.Error != nil {
 		ww.Write(rec.Error)
 	}
+	if rec.GasBurnLog != nil {
+		ww.Write(rec.GasBurnLog)
+	}
 	return ww.Err
-}
-
-func (rec *RequestReceipt) WithBlockData(blockIndex uint32, requestIndex uint16) *RequestReceipt {
-	rec.BlockIndex = blockIndex
-	rec.RequestIndex = requestIndex
-	return rec
 }
 
 func (rec *RequestReceipt) String() string {
@@ -98,6 +110,7 @@ func (rec *RequestReceipt) String() string {
 	ret += fmt.Sprintf("Gas budget / burned / fee charged: %d / %d /%d\n", rec.GasBudget, rec.GasBurned, rec.GasFeeCharged)
 	ret += fmt.Sprintf("Storage deposit charged: %d\n", rec.SDCharged)
 	ret += fmt.Sprintf("Call data: %s\n", rec.Request)
+	ret += fmt.Sprintf("burn log: %s\n", rec.GasBurnLog)
 	return ret
 }
 
@@ -130,6 +143,7 @@ func (rec *RequestReceipt) ToISCReceipt(resolvedError *isc.VMError) *isc.Receipt
 		BlockIndex:    rec.BlockIndex,
 		RequestIndex:  rec.RequestIndex,
 		ResolvedError: resolvedError.Error(),
+		GasBurnLog:    rec.GasBurnLog,
 	}
 }
 

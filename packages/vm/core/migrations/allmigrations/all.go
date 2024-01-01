@@ -2,7 +2,6 @@ package allmigrations
 
 import (
 	"github.com/iotaledger/wasp/packages/vm/core/migrations"
-	"github.com/iotaledger/wasp/packages/vm/core/migrations/m001"
 )
 
 var DefaultScheme = &migrations.MigrationScheme{
@@ -15,7 +14,5 @@ var DefaultScheme = &migrations.MigrationScheme{
 	// incremented.
 	// Old migrations can be pruned; for each migration pruned increment
 	// BaseSchemaVersion by one.
-	Migrations: []migrations.Migration{
-		m001.ResetAccountAssets,
-	},
+	Migrations: []migrations.Migration{},
 }
