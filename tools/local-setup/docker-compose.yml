@@ -153,8 +153,8 @@ services:
       - "traefik.http.routers.wasp-dashboard.middlewares=rewrite-wasp-dashboard"
       - "traefik.http.middlewares.rewrite-wasp-dashboard.stripprefix.prefixes=/wasp/dashboard"
     environment:
-      - WASP_API_URL=http://wasp.nearfieldquery.io
-      - L1_API_URL=http://hornet.nearfieldquery.io
+      - WASP_API_URL=http://wasp.nearfieldquery.com
+      - L1_API_URL=http://hornet.nearfieldquery.com
 
 volumes:
   wasp-db:
