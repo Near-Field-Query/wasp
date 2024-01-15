@@ -8,8 +8,8 @@ HORNET:
 
 WASP:
     env:
-      - WASP_API_URL = <http://wasp.nearfieldquery.io>
-      - L1_API_URL = <http://hornet.nearfieldquery.io>
+      - WASP_API_URL = <http://wasp.nearfieldquery.com>
+      - L1_API_URL = <http://hornet.nearfieldquery.com>
     ports:
       - "2112:2112/tcp" # Prometheus
       - "4000:4000/tcp" # Peering
